@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -8,16 +11,21 @@ import 'story/voice_narrator_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Lock the entire app strictly to horizontal (landscape) orientation
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.landscapeLeft,
-    DeviceOrientation.landscapeRight,
-  ]);
-  // Fullscreen immersive mode for kindergarten kids
-  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-  await SoundtrackService.instance.init();
-  await VoiceNarratorService.instance.init();
+  final isMobile = !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+  if (isMobile) {
+    // Lock the entire app strictly to horizontal (landscape) orientation
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    // Fullscreen immersive mode for kindergarten kids
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  }
   runApp(const NaranjitoApp());
+  unawaited(SoundtrackService.instance.init());
+  unawaited(VoiceNarratorService.instance.init());
 }
 
 class NaranjitoApp extends StatelessWidget {

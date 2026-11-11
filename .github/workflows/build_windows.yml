@@ -25,25 +25,93 @@ jobs:
           flutter config --enable-windows-desktop
           flutter pub get
 
+      - name: Patch flutter_tts Windows C++ plugin null-safety
+        shell: pwsh
+        run: |
+          $ttsFiles = Get-ChildItem -Path "$env:LOCALAPPDATA\Pub\Cache" -Filter "flutter_tts_plugin.cpp" -Recurse -ErrorAction SilentlyContinue
+          foreach ($file in $ttsFiles) {
+            $content = Get-Content $file.FullName -Raw
+            $content = $content.Replace("if (awaitSpeakCompletion) {", "if (awaitSpeakCompletion && speakResult) {")
+            $content = $content.Replace("if (awaitSpeakCompletion){", "if (awaitSpeakCompletion && speakResult){")
+            Set-Content -Path $file.FullName -Value $content -Encoding UTF8
+            Write-Host "Patched $($file.FullName)"
+          }
+
       - name: Build Optimized Windows Release (.exe)
         run: flutter build windows --release
 
-      - name: Package Windows Release ZIP
+      - name: Bundle VC++ Runtime DLLs & Build Standalone EXE + Portable ZIP
         shell: pwsh
         run: |
-          Compress-Archive -Path "build/windows/x64/runner/Release/*" -DestinationPath "Naranjito-Windows-Release.zip" -Force
+          $releaseDir = "build/windows/x64/runner/Release"
+          $vcDlls = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "concrt140.dll")
+          foreach ($dll in $vcDlls) {
+            $sysPath = "C:\Windows\System32\$dll"
+            if (Test-Path $sysPath) {
+              Copy-Item $sysPath -Destination $releaseDir -Force
+            }
+          }
 
-      - name: Upload Windows Release Artifact
+          Compress-Archive -Path "$releaseDir/*" -DestinationPath "Naranjito-Windows-Release.zip" -Force
+
+          $issContent = @"
+          [Setup]
+          AppId={{B8F5E4A2-9C7D-4E3A-8F1B-2D6C9A4E7F10}
+          AppName=Naranjito
+          AppVersion=1.0.0
+          DefaultDirName={autopf}\Naranjito
+          PrivilegesRequired=lowest
+          DisableWelcomePage=yes
+          DisableDirPage=yes
+          DisableProgramGroupPage=yes
+          DisableReadyPage=yes
+          DisableFinishedPage=yes
+          OutputDir=.
+          OutputBaseFilename=Naranjito-Windows
+          SetupIconFile=windows\runner\resources\app_icon.ico
+          Compression=lzma2/fast
+          SolidCompression=yes
+
+          [Files]
+          Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{autodesktop}\Naranjito"; Filename: "{app}\naranjito.exe"; WorkingDir: "{app}"
+          Name: "{autoprograms}\Naranjito"; Filename: "{app}\naranjito.exe"; WorkingDir: "{app}"
+
+          [Run]
+          Filename: "{app}\naranjito.exe"; WorkingDir: "{app}"; Flags: nowait
+
+          [Code]
+          function PostMessage(hWnd: HWND; Msg: Cardinal; wParam, lParam: Longint): BOOL;
+            external 'PostMessageW@user32.dll stdcall';
+
+          procedure CurPageChanged(CurPageID: Integer);
+          begin
+            if CurPageID = wpReady then
+            begin
+              PostMessage(WizardForm.NextButton.Handle, `$00F5, 0, 0);
+            end;
+          end;
+          "@
+          Set-Content -Path "installer.iss" -Value $issContent -Encoding UTF8
+          iscc "installer.iss"
+
+      - name: Upload Windows Standalone EXE Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Naranjito-Windows-Release
-          path: build/windows/x64/runner/Release/
+          name: Naranjito-Windows-EXE
+          path: |
+            Naranjito-Windows.exe
+            Naranjito-Windows-Release.zip
 
       - name: Publish Windows EXE to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.0-windows
           name: "Naranjito - Versión Optimizada (Windows .exe)"
-          files: Naranjito-Windows-Release.zip
+          files: |
+            Naranjito-Windows.exe
+            Naranjito-Windows-Release.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
