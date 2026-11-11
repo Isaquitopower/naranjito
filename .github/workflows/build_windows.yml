@@ -5,6 +5,9 @@ on:
   push:
     branches: [ main, master ]
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -22,11 +25,25 @@ jobs:
           flutter config --enable-windows-desktop
           flutter pub get
 
-      - name: Build Windows Release (.exe)
+      - name: Build Optimized Windows Release (.exe)
         run: flutter build windows --release
 
-      - name: Upload Windows Release Bundle
+      - name: Package Windows Release ZIP
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "build/windows/x64/runner/Release/*" -DestinationPath "Naranjito-Windows-Release.zip" -Force
+
+      - name: Upload Windows Release Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Naranjito-Windows-Release
           path: build/windows/x64/runner/Release/
+
+      - name: Publish Windows EXE to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0-windows
+          name: "Naranjito - Versión Optimizada (Windows .exe)"
+          files: Naranjito-Windows-Release.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

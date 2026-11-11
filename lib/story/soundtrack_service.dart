@@ -3,12 +3,13 @@ import 'package:flutter/material.dart';
 
 import 'voice_narrator_service.dart';
 
-class SoundtrackService extends ChangeNotifier {
+class SoundtrackService extends ChangeNotifier with WidgetsBindingObserver {
   SoundtrackService._();
   static final SoundtrackService instance = SoundtrackService._();
 
   final AudioPlayer _bgmPlayer = AudioPlayer();
   bool _initialized = false;
+  bool _isAppInForeground = true;
   String? _currentAssetPath;
 
   double _musicVolume = 0.35;
@@ -38,6 +39,7 @@ class SoundtrackService extends ChangeNotifier {
 
   Future<void> init() async {
     if (_initialized) return;
+    WidgetsBinding.instance.addObserver(this);
     try {
       await AudioPlayer.global.setAudioContext(
         AudioContext(
@@ -62,6 +64,36 @@ class SoundtrackService extends ChangeNotifier {
     }
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _isAppInForeground = true;
+        _resumeIfActive();
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        _isAppInForeground = false;
+        _pauseForBackground();
+    }
+  }
+
+  Future<void> _pauseForBackground() async {
+    try {
+      await _bgmPlayer.pause();
+    } catch (_) {}
+    await VoiceNarratorService.instance.stop();
+  }
+
+  Future<void> _resumeIfActive() async {
+    if (_currentAssetPath == null) return;
+    try {
+      await _bgmPlayer.setVolume(_musicVolume);
+      await _bgmPlayer.resume();
+    } catch (_) {}
+  }
+
   Future<void> playHomeMusic() async {
     await _playTrack(homeTrack);
   }
@@ -80,6 +112,7 @@ class SoundtrackService extends ChangeNotifier {
         return;
       }
       _currentAssetPath = assetPath;
+      if (!_isAppInForeground) return;
       await _bgmPlayer.stop();
       await _bgmPlayer.setReleaseMode(ReleaseMode.loop);
       await _bgmPlayer.setVolume(_musicVolume);

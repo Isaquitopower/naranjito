@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flame/components.dart';
 import 'package:flame/effects.dart';
 import 'package:flame/events.dart';
+import 'package:flame/flame.dart';
 import 'package:flame/game.dart';
 import 'package:flame/particles.dart';
 import 'package:flutter/material.dart';
@@ -13,13 +15,65 @@ import 'story_data.dart';
 
 class StoryFlameGame extends FlameGame {
   final int storyIndex;
+  final VoidCallback? onSceneReady;
   final void Function(String spokenText, double pitch, String speakerId)?
       onSpeakRequest;
 
   StoryFlameGame({
     this.storyIndex = 0,
+    this.onSceneReady,
     this.onSpeakRequest,
   });
+
+  static final Map<String, ui.Image> _sharedImageCache = {};
+  static final Map<String, Future<ui.Image>> _inFlightLoads = {};
+  static int? _cachedStoryIndex;
+
+  static Future<ui.Image> _loadCachedImage(String relativePath) {
+    final existing = _sharedImageCache[relativePath];
+    if (existing != null) {
+      return Future<ui.Image>.value(existing);
+    }
+    return _inFlightLoads.putIfAbsent(relativePath, () async {
+      Flame.images.prefix = 'assets/images/';
+      final img = await Flame.images.load(relativePath);
+      _sharedImageCache[relativePath] = img;
+      return img;
+    });
+  }
+
+  /// Preloads all assets needed for the first scene of [storyIndex] in parallel,
+  /// and evicts previous stories' heavy sprite sheets to keep memory usage low.
+  static Future<void> preloadStoryAssets(
+    int storyIndex, {
+    bool firstSceneOnly = false,
+  }) async {
+    if (_cachedStoryIndex != null && _cachedStoryIndex != storyIndex) {
+      Flame.images.clearCache();
+      _sharedImageCache.clear();
+      _inFlightLoads.clear();
+    }
+    _cachedStoryIndex = storyIndex;
+
+    final scenes = getStoryScenes(storyIndex);
+    if (scenes.isEmpty) return;
+
+    final targetScenes = firstSceneOnly ? [scenes.first] : scenes;
+    final paths = <String>{};
+    for (final scene in targetScenes) {
+      paths.add(scene.backgroundAsset);
+      for (final placement in scene.characters) {
+        paths.add(placement.initialPose.sheetFileName);
+      }
+      for (final beat in scene.beats) {
+        for (final pose in beat.poseChanges.values) {
+          paths.add(pose.sheetFileName);
+        }
+      }
+    }
+
+    await Future.wait(paths.map(_loadCachedImage));
+  }
 
   int _currentSceneIndex = 0;
   String? _activeSpeakerId;
@@ -27,8 +81,6 @@ class StoryFlameGame extends FlameGame {
   late StoryBackdropComponent _backdrop;
   final List<Component> _sceneComponents = [];
 
-  final Map<String, ui.Image> _characterSheets = {};
-  final Map<String, ui.Image> _backgroundImages = {};
   bool _isLoaded = false;
 
   List<StorySceneData> get _scenes => getStoryScenes(storyIndex);
@@ -59,7 +111,7 @@ class StoryFlameGame extends FlameGame {
         if (newPose != null) {
           comp.updatePose(
             newPose,
-            newSheetImage: _characterSheets[newPose.sheetFileName],
+            newSheetImage: _sharedImageCache[newPose.sheetFileName],
           );
         }
 
@@ -81,101 +133,23 @@ class StoryFlameGame extends FlameGame {
   @override
   Future<void> onLoad() async {
     await super.onLoad();
-    images.prefix = 'assets/images/';
 
-    // Load backgrounds for Story 1..10
-    _backgroundImages['background/stories/Crayon/Crayon1.jpg'] =
-        await images.load('background/stories/Crayon/Crayon1.jpg');
-    _backgroundImages['background/stories/Crayon/Crayon2.jpg'] =
-        await images.load('background/stories/Crayon/Crayon2.jpg');
-    _backgroundImages['background/stories/Nube/Nube.jpg'] =
-        await images.load('background/stories/Nube/Nube.jpg');
-    _backgroundImages['background/stories/Burbuja/Burbuja.jpg'] =
-        await images.load('background/stories/Burbuja/Burbuja.jpg');
-    _backgroundImages['background/stories/Papalote/Papalote1.jpg'] =
-        await images.load('background/stories/Papalote/Papalote1.jpg');
-    _backgroundImages['background/stories/Papalote/Papalote2.jpg'] =
-        await images.load('background/stories/Papalote/Papalote2.jpg');
-    _backgroundImages['background/stories/Companera/Companera1.jpg'] =
-        await images.load('background/stories/Companera/Companera1.jpg');
-    _backgroundImages['background/stories/Companera/Companera2.jpg'] =
-        await images.load('background/stories/Companera/Companera2.jpg');
-    _backgroundImages['background/stories/Juegos/Juegos1.jpg'] =
-        await images.load('background/stories/Juegos/Juegos1.jpg');
-    _backgroundImages['background/stories/Juegos/Juegos2.jpg'] =
-        await images.load('background/stories/Juegos/Juegos2.jpg');
-    _backgroundImages['background/stories/Juegos/Juegos3.jpg'] =
-        await images.load('background/stories/Juegos/Juegos3.jpg');
-    _backgroundImages['background/stories/Pieza/Pieza1.jpg'] =
-        await images.load('background/stories/Pieza/Pieza1.jpg');
-    _backgroundImages['background/stories/Pieza/Pieza2.jpg'] =
-        await images.load('background/stories/Pieza/Pieza2.jpg');
-    _backgroundImages['background/stories/Pieza/Pieza3.jpg'] =
-        await images.load('background/stories/Pieza/Pieza3.jpg');
-    _backgroundImages['background/stories/Carrito/Carrito.jpg'] =
-        await images.load('background/stories/Carrito/Carrito.jpg');
-    _backgroundImages['background/stories/Cosquillas/Cosquillas.jpg'] =
-        await images.load('background/stories/Cosquillas/Cosquillas.jpg');
-    _backgroundImages['background/stories/Parque/Parque1.jpg'] =
-        await images.load('background/stories/Parque/Parque1.jpg');
-    _backgroundImages['background/stories/Parque/Parque2.jpg'] =
-        await images.load('background/stories/Parque/Parque2.jpg');
-
-    // Load multi-pose sprite sheets keyed by their sheetFileName
-    const sheetPaths = [
-      'movimientos/crayon/Companero crayon.png',
-      'movimientos/crayon/Florecita crayon.png',
-      'movimientos/crayon/Naranjito crayon.png',
-      'movimientos/crayon/Pablito crayon.png',
-      'movimientos/crayon/Maestra crayon.png',
-      'movimientos/nube/Pablito nube.png',
-      'movimientos/nube/Naranjito nube.png',
-      'movimientos/nube/Florecita nube.png',
-      'movimientos/burbuja/Tia burbuja.png',
-      'movimientos/burbuja/Florecita burbuja.png',
-      'movimientos/burbuja/Naranjito burbuja.png',
-      'movimientos/burbuja/Pablito burbuja.png',
-      'movimientos/papalote/Pablito papalote.png',
-      'movimientos/papalote/Naranjito papalote.png',
-      'movimientos/papalote/Florecita papalote.png',
-      'movimientos/papalote/papa papalote1.png',
-      'movimientos/papalote/Papa papalote2.png',
-      'movimientos/companera/Florecita companera.png',
-      'movimientos/companera/Naranjito companera.png',
-      'movimientos/companera/Pablito companera.png',
-      'movimientos/companera/companera1.png',
-      'movimientos/companera/companera2.png',
-      'movimientos/juegos/Companero juegos.png',
-      'movimientos/juegos/Florecita juegos.png',
-      'movimientos/juegos/Naranjito juegos.png',
-      'movimientos/juegos/Pablito juegos.png',
-      'movimientos/pieza/Florecita pieza.png',
-      'movimientos/pieza/Naranjito pieza.png',
-      'movimientos/pieza/Pablito pieza.png',
-      'movimientos/carrito/Florecita carrito.png',
-      'movimientos/carrito/Naranjito carrito.png',
-      'movimientos/carrito/Pablito carrito.png',
-      'movimientos/cosquillas/Companero cosquillas.png',
-      'movimientos/cosquillas/Florecita cosquillas.png',
-      'movimientos/cosquillas/Naranjito cosquillas.png',
-      'movimientos/cosquillas/Pablito cosquillas.png',
-      'movimientos/parque/Florecita parque.png',
-      'movimientos/parque/Naranjito parque.png',
-      'movimientos/parque/Pablito parque.png',
-      'movimientos/parque/mama pablito parque.png',
-      'movimientos/parque/senor desconocido parque.png',
-    ];
-    for (final path in sheetPaths) {
-      _characterSheets[path] = await images.load(path);
-    }
+    // 1. Load only the first scene's assets in parallel for instant display
+    await preloadStoryAssets(storyIndex, firstSceneOnly: true);
 
     final initialBg =
-        _backgroundImages[_scenes[_currentSceneIndex].backgroundAsset];
+        _sharedImageCache[_scenes[_currentSceneIndex].backgroundAsset];
     _backdrop = StoryBackdropComponent(backgroundImage: initialBg);
     await add(_backdrop);
 
     _isLoaded = true;
     _buildScene(_currentSceneIndex);
+    onSceneReady?.call();
+
+    // 2. Preload any remaining scenes of this story in the background
+    if (_scenes.length > 1) {
+      unawaited(preloadStoryAssets(storyIndex, firstSceneOnly: false));
+    }
   }
 
   @override
@@ -186,12 +160,14 @@ class StoryFlameGame extends FlameGame {
     }
   }
 
-  void loadScene(int index) {
+  Future<void> loadScene(int index) async {
     if (index < 0 || index >= _scenes.length) return;
     _currentSceneIndex = index;
     if (!_isLoaded) return;
 
-    final bgImage = _backgroundImages[_scenes[index].backgroundAsset];
+    await preloadStoryAssets(storyIndex, firstSceneOnly: false);
+
+    final bgImage = _sharedImageCache[_scenes[index].backgroundAsset];
     _backdrop.updateBackground(bgImage);
     _buildScene(index);
   }
@@ -227,7 +203,8 @@ class StoryFlameGame extends FlameGame {
 
     // Add animated characters with their initial pose from the collage
     for (final placement in scene.characters) {
-      final sheetImg = _characterSheets[placement.initialPose.sheetFileName];
+      final sheetImg =
+          _sharedImageCache[placement.initialPose.sheetFileName];
       if (sheetImg == null) continue;
 
       final baseHeight =

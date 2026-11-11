@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'story/soundtrack_service.dart';
-import 'story/story_data.dart';
+import 'story/story_flame_game.dart';
 import 'story/story_screen.dart';
 import 'story/voice_narrator_service.dart';
 
@@ -154,11 +154,15 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _openStory(StoryCatalogItem item) async {
     if (item.isUnlocked) {
-      await VoiceNarratorService.instance.stop();
+      VoiceNarratorService.instance.stop();
+      StoryFlameGame.preloadStoryAssets(
+        item.index,
+        firstSceneOnly: true,
+      );
       if (!mounted) return;
       await Navigator.of(context).push(
         PageRouteBuilder<void>(
-          transitionDuration: const Duration(milliseconds: 500),
+          transitionDuration: const Duration(milliseconds: 320),
           pageBuilder: (context, animation, secondaryAnimation) =>
               StoryReaderScreen(storyIndex: item.index),
           transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -214,6 +218,9 @@ class _HomeScreenState extends State<HomeScreen>
                   child: Image.asset(
                     'assets/images/background/Portada.jpg',
                     fit: BoxFit.fill,
+                    cacheWidth: 1920,
+                    filterQuality: FilterQuality.low,
+                    gaplessPlayback: true,
                   ),
                 ),
 
@@ -331,17 +338,17 @@ class _PortadaStorySlot extends StatelessWidget {
         1 => const Color(0xFF0288D1),
         _ => const Color(0xFFFF6D00),
       };
-      final bgAsset = switch (item.index) {
-        9 => 'assets/images/background/stories/Parque/Parque1.jpg',
-        8 => 'assets/images/background/stories/Cosquillas/Cosquillas.jpg',
-        7 => 'assets/images/background/stories/Carrito/Carrito.jpg',
-        6 => 'assets/images/background/stories/Pieza/Pieza1.jpg',
-        5 => 'assets/images/background/stories/Juegos/Juegos2.jpg',
-        4 => 'assets/images/background/stories/Companera/Companera2.jpg',
-        3 => 'assets/images/background/stories/Papalote/Papalote1.jpg',
-        2 => 'assets/images/background/stories/Burbuja/Burbuja.jpg',
-        1 => 'assets/images/background/stories/Nube/Nube.jpg',
-        _ => 'assets/images/background/stories/Crayon/Crayon2.jpg',
+      final coverAsset = switch (item.index) {
+        9 => 'assets/images/portadas/parque.jpg',
+        8 => 'assets/images/portadas/cosquillas.jpg',
+        7 => 'assets/images/portadas/carrito.jpg',
+        6 => 'assets/images/portadas/pieza.jpg',
+        5 => 'assets/images/portadas/juegos.jpg',
+        4 => 'assets/images/portadas/companera.jpg',
+        3 => 'assets/images/portadas/papalote.jpg',
+        2 => 'assets/images/portadas/burbuja.jpg',
+        1 => 'assets/images/portadas/nube.jpg',
+        _ => 'assets/images/portadas/crayon.jpg',
       };
 
       return AnimatedBuilder(
@@ -379,239 +386,13 @@ class _PortadaStorySlot extends StatelessWidget {
                 fit: StackFit.expand,
                 alignment: Alignment.center,
                 children: [
-                  // Background preview inside the story card
+                  // Story cover illustration from assets/images/portadas/
                   Image.asset(
-                    bgAsset,
+                    coverAsset,
                     fit: BoxFit.cover,
-                  ),
-
-                  // Cropped poses preview for each unlocked story
-                  Positioned(
-                    top: 16,
-                    left: 10,
-                    right: 10,
-                    bottom: 14,
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      crossAxisAlignment: CrossAxisAlignment.end,
-                      children: switch (item.index) {
-                        9 => const [
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: ParquePoseAtlas.pablitoStopHandFirmNo,
-                              ),
-                            ),
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(bottom: 14),
-                                child: CharacterPoseWidget(
-                                  pose: ParquePoseAtlas
-                                      .naranjitoWiseFingerUpWarning,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: ParquePoseAtlas.mamaOpenArmsProtectiveHug,
-                              ),
-                            ),
-                          ],
-                        8 => const [
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: CosquillasPoseAtlas
-                                    .companeroTickleHandsUp,
-                              ),
-                            ),
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(bottom: 14),
-                                child: CharacterPoseWidget(
-                                  pose: CosquillasPoseAtlas
-                                      .naranjitoStopHandFirm,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: CosquillasPoseAtlas
-                                    .florecitaStopHandFirm,
-                              ),
-                            ),
-                          ],
-                        7 => const [
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: CarritoPoseAtlas.pablitoPleaseHandsTogether,
-                              ),
-                            ),
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(bottom: 14),
-                                child: CharacterPoseWidget(
-                                  pose: CarritoPoseAtlas
-                                      .naranjitoShowingBothHandsOpen,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: CarritoPoseAtlas
-                                    .florecitaSharingCarBothHands,
-                              ),
-                            ),
-                          ],
-                        6 => const [
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: PiezaPoseAtlas
-                                    .florecitaSadHoldingPuzzleBox,
-                              ),
-                            ),
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(bottom: 14),
-                                child: CharacterPoseWidget(
-                                  pose: PiezaPoseAtlas
-                                      .naranjitoDeepBreathingEyesClosed,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: PiezaPoseAtlas.pablitoIdeaFingerUp,
-                              ),
-                            ),
-                          ],
-                        5 => const [
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: JuegosPoseAtlas.pablitoStopHandFirm,
-                              ),
-                            ),
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(bottom: 14),
-                                child: CharacterPoseWidget(
-                                  pose: JuegosPoseAtlas.naranjitoWiseFingerUp,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: JuegosPoseAtlas.florecitaHelpingHandDown,
-                              ),
-                            ),
-                          ],
-                        4 => const [
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: CompaneraPoseAtlas
-                                    .florecitaOfferingHandToFriend,
-                              ),
-                            ),
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(bottom: 14),
-                                child: CharacterPoseWidget(
-                                  pose: CompaneraPoseAtlas
-                                      .naranjitoPointingToBigSmile,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: CompaneraPoseAtlas.companeraWavingShyly,
-                              ),
-                            ),
-                          ],
-                        3 => const [
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose:
-                                    PapalotePoseAtlas.pablitoReachingUpOnTiptoes,
-                              ),
-                            ),
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(bottom: 14),
-                                child: CharacterPoseWidget(
-                                  pose: PapalotePoseAtlas.naranjitoWiseFingerUp,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose:
-                                    PapalotePoseAtlas.papaHandingKiteToPablito,
-                              ),
-                            ),
-                          ],
-                        2 => const [
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: BurbujaPoseAtlas.tiaBearHugArmsWide,
-                              ),
-                            ),
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(bottom: 14),
-                                child: CharacterPoseWidget(
-                                  pose: BurbujaPoseAtlas.naranjitoHoldingBubble,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: BurbujaPoseAtlas.florecitaHighFiveRaised,
-                              ),
-                            ),
-                          ],
-                        1 => const [
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: NubePoseAtlas.pablitoAngryHoldingBall,
-                              ),
-                            ),
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(bottom: 14),
-                                child: CharacterPoseWidget(
-                                  pose: NubePoseAtlas.naranjitoHoldingUmbrella,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: NubePoseAtlas.florecitaExplorerSalute,
-                              ),
-                            ),
-                          ],
-                        _ => const [
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose: CrayonPoseAtlas
-                                    .companeroHoldingBrokenCrayon,
-                              ),
-                            ),
-                            Expanded(
-                              child: Padding(
-                                padding: EdgeInsets.only(bottom: 14),
-                                child: CharacterPoseWidget(
-                                  pose:
-                                      CrayonPoseAtlas.naranjitoImportantAdvice,
-                                ),
-                              ),
-                            ),
-                            Expanded(
-                              child: CharacterPoseWidget(
-                                pose:
-                                    CrayonPoseAtlas.florecitaShockedHandChest,
-                              ),
-                            ),
-                          ],
-                      },
-                    ),
+                    cacheWidth: 512,
+                    filterQuality: FilterQuality.low,
+                    gaplessPlayback: true,
                   ),
 
                   // Big friendly Play icon button in the bottom-right corner

@@ -43,6 +43,11 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
 
     _game = StoryFlameGame(
       storyIndex: widget.storyIndex,
+      onSceneReady: () {
+        if (mounted) {
+          _playCurrentSceneScript();
+        }
+      },
       onSpeakRequest: (phrase, pitch, speakerId) {
         _speakSingleInteraction(phrase, pitch: pitch, speakerId: speakerId);
       },
@@ -50,7 +55,6 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       SoundtrackService.instance.playStoryMusic(widget.storyIndex);
-      _playCurrentSceneScript();
     });
   }
 
@@ -150,17 +154,19 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     );
   }
 
-  void _goToScene(int newIndex) {
+  Future<void> _goToScene(int newIndex) async {
     if (newIndex < 0 || newIndex >= _scenes.length) return;
     _playbackSessionId++;
     _autoAdvanceTimer?.cancel();
-    VoiceNarratorService.instance.stop();
+    await VoiceNarratorService.instance.stop();
+    if (!mounted) return;
 
     setState(() {
       _sceneIndex = newIndex;
       _narrationCompletedForScene = false;
     });
-    _game.loadScene(newIndex);
+    await _game.loadScene(newIndex);
+    if (!mounted) return;
     _playCurrentSceneScript();
   }
 
@@ -517,6 +523,15 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     return Scaffold(
       body: Stack(
         children: [
+          // 0. Instant background layer visible on the very first frame
+          Positioned.fill(
+            child: Image.asset(
+              'assets/images/${_scenes[_sceneIndex].backgroundAsset}',
+              fit: BoxFit.fill,
+              gaplessPlayback: true,
+            ),
+          ),
+
           // 1. Fullscreen Flame Interactive World (100% visual, zero text)
           Positioned.fill(
             child: GameWidget(game: _game),

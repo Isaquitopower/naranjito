@@ -62,6 +62,7 @@ flutter:
 
   assets:
     - assets/images/background/
+    - assets/images/portadas/
     - assets/images/background/stories/Crayon/
     - assets/images/background/stories/Nube/
     - assets/images/background/stories/Burbuja/
