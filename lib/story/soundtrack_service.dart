@@ -126,6 +126,7 @@ class SoundtrackService extends ChangeNotifier with WidgetsBindingObserver {
     _musicVolume = value.clamp(0.0, 1.0);
     notifyListeners();
     try {
+      // Direct linear mapping: volume 0.0 is completely silent, 1.0 is full volume
       await _bgmPlayer.setVolume(_musicVolume);
     } catch (_) {}
   }

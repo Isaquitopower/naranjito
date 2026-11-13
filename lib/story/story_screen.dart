@@ -24,16 +24,94 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     with TickerProviderStateMixin {
   int _sceneIndex = 0;
   int _beatIndex = 0;
-  bool _isSpeaking = false;
+  int _charOffset = 0;
   bool _isPaused = false;
   bool _narrationCompletedForScene = false;
   int _playbackSessionId = 0;
   Timer? _autoAdvanceTimer;
+  final ValueNotifier<double> _progressNotifier = ValueNotifier<double>(0.0);
 
   late final StoryFlameGame _game;
   late final AnimationController _pulseController;
 
   List<StorySceneData> get _scenes => getStoryScenes(widget.storyIndex);
+
+  int get _totalCharsInStory {
+    var chars = 0;
+    for (final s in _scenes) {
+      for (final b in s.beats) {
+        chars += b.text.length;
+      }
+    }
+    return chars > 0 ? chars : 1;
+  }
+
+  int get _currentGlobalCharsSpoken {
+    var chars = 0;
+    for (var i = 0; i < _sceneIndex; i++) {
+      for (final b in _scenes[i].beats) {
+        chars += b.text.length;
+      }
+    }
+    final currentScene = _scenes[_sceneIndex];
+    for (var b = 0; b < _beatIndex && b < currentScene.beats.length; b++) {
+      chars += currentScene.beats[b].text.length;
+    }
+    chars += _charOffset;
+    return chars;
+  }
+
+  double get _currentGlobalProgress {
+    final total = _totalCharsInStory;
+    final current = _currentGlobalCharsSpoken;
+    return (current / total).clamp(0.0, 1.0);
+  }
+
+  void _seekToGlobalProgress(double progress) {
+    final targetChars = (progress * _totalCharsInStory).round();
+    var accumulated = 0;
+
+    for (var sIdx = 0; sIdx < _scenes.length; sIdx++) {
+      final scene = _scenes[sIdx];
+      for (var bIdx = 0; bIdx < scene.beats.length; bIdx++) {
+        final beatLen = scene.beats[bIdx].text.length;
+        if (targetChars <= accumulated + beatLen) {
+          final offsetInBeat = (targetChars - accumulated).clamp(0, beatLen);
+          _seekToSceneBeatAndChar(sIdx, bIdx, offsetInBeat);
+          return;
+        }
+        accumulated += beatLen;
+      }
+    }
+    _seekToSceneBeatAndChar(_scenes.length - 1, _scenes.last.beats.length - 1, 0);
+  }
+
+  Future<void> _seekToSceneBeatAndChar(int sceneIdx, int beatIdx, int charOffset) async {
+    _playbackSessionId++;
+    _autoAdvanceTimer?.cancel();
+    VoiceNarratorService.instance.stop();
+
+    setState(() {
+      _sceneIndex = sceneIdx;
+      _beatIndex = beatIdx;
+      _charOffset = charOffset;
+      _narrationCompletedForScene = false;
+    });
+    _progressNotifier.value = _currentGlobalProgress;
+
+    await _game.loadScene(sceneIdx);
+    if (!mounted) return;
+
+    if (_isPaused) {
+      // Just apply pose of that beat without speaking while paused
+      final scene = _scenes[sceneIdx];
+      if (beatIdx < scene.beats.length) {
+        _game.applyVoiceBeat(scene.beats[beatIdx]);
+      }
+    } else {
+      _playCurrentSceneScript(fromBeatIndex: beatIdx, fromCharOffset: charOffset);
+    }
+  }
 
   @override
   void initState() {
@@ -57,11 +135,19 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       SoundtrackService.instance.playStoryMusic(widget.storyIndex);
+      VoiceNarratorService.instance.onSpeechProgress = (offset) {
+        if (mounted && !_isPaused) {
+          _charOffset = offset;
+          _progressNotifier.value = _currentGlobalProgress;
+        }
+      };
     });
   }
 
   @override
   void dispose() {
+    VoiceNarratorService.instance.onSpeechProgress = null;
+    _progressNotifier.dispose();
     _playbackSessionId++;
     _autoAdvanceTimer?.cancel();
     _pulseController.dispose();
@@ -86,23 +172,29 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
           }
         });
       } else {
-        // Resume beats from current beat
-        _playCurrentSceneScript(fromBeatIndex: _beatIndex);
+        // Resume narration exactly from the saved character offset of the current beat
+        _playCurrentSceneScript(
+          fromBeatIndex: _beatIndex,
+          fromCharOffset: _charOffset,
+        );
       }
     } else {
-      // Pause
+      // Pause exactly where it currently is speaking
       _playbackSessionId++;
       _autoAdvanceTimer?.cancel();
-      VoiceNarratorService.instance.stop();
+      final pausedOffset = VoiceNarratorService.instance.pauseNarration();
       setState(() {
         _isPaused = true;
-        _isSpeaking = false;
+        _charOffset = pausedOffset;
       });
       _game.setActiveSpeaker(null);
     }
   }
 
-  Future<void> _playCurrentSceneScript({int fromBeatIndex = 0}) async {
+  Future<void> _playCurrentSceneScript({
+    int fromBeatIndex = 0,
+    int fromCharOffset = 0,
+  }) async {
     _autoAdvanceTimer?.cancel();
     final sessionId = ++_playbackSessionId;
     await VoiceNarratorService.instance.stop();
@@ -112,23 +204,29 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
 
     setState(() {
       _beatIndex = fromBeatIndex;
-      _isSpeaking = true;
+      _charOffset = fromCharOffset;
       _narrationCompletedForScene = false;
     });
+    _progressNotifier.value = _currentGlobalProgress;
 
     for (var i = fromBeatIndex; i < scene.beats.length; i++) {
       if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
       _beatIndex = i;
+      _progressNotifier.value = _currentGlobalProgress;
       final beat = scene.beats[i];
 
       // Update each character's exact pose and position for this beat
       _game.applyVoiceBeat(beat);
+
+      final startOffset = (i == fromBeatIndex) ? fromCharOffset : 0;
+      _charOffset = startOffset;
 
       final completer = Completer<void>();
       await VoiceNarratorService.instance.speak(
         beat.text,
         pitch: beat.pitch,
         rate: beat.rate,
+        startCharOffset: startOffset,
         onDone: () {
           if (!completer.isCompleted) {
             completer.complete();
@@ -139,6 +237,9 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
       await completer.future;
       if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
 
+      // Completed this beat normally, reset offset for next beats
+      _charOffset = 0;
+
       // Natural pause between story beats
       await Future<void>.delayed(const Duration(milliseconds: 350));
     }
@@ -146,7 +247,7 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
 
     setState(() {
-      _isSpeaking = false;
+      _charOffset = 0;
       _narrationCompletedForScene = true;
     });
     _game.setActiveSpeaker(null);
@@ -172,9 +273,6 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     await VoiceNarratorService.instance.stop();
 
     if (!mounted) return;
-    setState(() {
-      _isSpeaking = true;
-    });
     _game.setActiveSpeaker(speakerId);
 
     await VoiceNarratorService.instance.speak(
@@ -184,7 +282,6 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
       onDone: () {
         if (!mounted || sessionId != _playbackSessionId) return;
         setState(() {
-          _isSpeaking = false;
           _narrationCompletedForScene = true;
         });
         _game.setActiveSpeaker(null);
@@ -593,72 +690,86 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
                     },
                   ),
 
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 18,
-                      vertical: 10,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.85),
-                      borderRadius: BorderRadius.circular(32),
-                      border: Border.all(
-                        color: const Color(0xFFFFB74D),
-                        width: 3.5,
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: List.generate(
-                        _scenes.length,
-                        (idx) {
-                          final isCompletedOrCurrent = idx <= _sceneIndex;
-                          final isCurrent = idx == _sceneIndex;
-                          return AnimatedContainer(
-                            duration: const Duration(milliseconds: 300),
-                            margin: const EdgeInsets.symmetric(horizontal: 6),
-                            child: Icon(
-                              Icons.favorite_rounded,
-                              size: isCurrent ? 30 : 22,
-                              color: isCompletedOrCurrent
-                                  ? const Color(0xFFFF6D00)
-                                  : const Color(0xFFFFCC80),
+                  // 2. Interactive faithful progress bar (Kids-friendly, scrubbable slider)
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 18),
+                      child: Container(
+                        height: 52,
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.90),
+                          borderRadius: BorderRadius.circular(28),
+                          border: Border.all(
+                            color: const Color(0xFFFFB74D),
+                            width: 3.5,
+                          ),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Colors.black12,
+                              blurRadius: 8,
+                              offset: Offset(0, 3),
                             ),
-                          );
-                        },
+                          ],
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.auto_stories_rounded,
+                              color: Color(0xFFFF8F00),
+                              size: 26,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: ValueListenableBuilder<double>(
+                                valueListenable: _progressNotifier,
+                                builder: (context, progressVal, _) {
+                                  return SliderTheme(
+                                    data: SliderTheme.of(context).copyWith(
+                                      trackHeight: 12,
+                                      activeTrackColor: const Color(0xFFFF8F00),
+                                      inactiveTrackColor: const Color(0xFFFFE0B2),
+                                      thumbColor: const Color(0xFFFF6D00),
+                                      thumbShape: const RoundSliderThumbShape(
+                                        enabledThumbRadius: 14,
+                                        elevation: 4,
+                                      ),
+                                      overlayColor: const Color(0xFFFF8F00)
+                                          .withValues(alpha: 0.22),
+                                      overlayShape: const RoundSliderOverlayShape(
+                                        overlayRadius: 22,
+                                      ),
+                                    ),
+                                    child: Slider(
+                                      value: progressVal.clamp(0.0, 1.0),
+                                      min: 0.0,
+                                      max: 1.0,
+                                      onChanged: (val) {
+                                        _progressNotifier.value = val;
+                                        _seekToGlobalProgress(val);
+                                      },
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            const Icon(
+                              Icons.star_rounded,
+                              color: Color(0xFFFFB300),
+                              size: 28,
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
 
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _RoundKidsButton(
-                        icon: Icons.settings_rounded,
-                        color: const Color(0xFF8E24AA),
-                        size: 56,
-                        onTap: () => showAppSettingsDialog(context),
-                      ),
-                      const SizedBox(width: 12),
-                      AnimatedBuilder(
-                        animation: _pulseController,
-                        builder: (context, child) {
-                          final scale = _isSpeaking
-                              ? 1.0 + (_pulseController.value * 0.14)
-                              : 1.0;
-                          return Transform.scale(scale: scale, child: child);
-                        },
-                        child: _RoundKidsButton(
-                          icon: _isSpeaking
-                              ? Icons.volume_up_rounded
-                              : Icons.record_voice_over_rounded,
-                          color: _isSpeaking
-                              ? const Color(0xFF43A047)
-                              : const Color(0xFFFFB300),
-                          size: 62,
-                          onTap: _playCurrentSceneScript,
-                        ),
-                      ),
-                    ],
+                  _RoundKidsButton(
+                    icon: Icons.settings_rounded,
+                    color: const Color(0xFF8E24AA),
+                    size: 56,
+                    onTap: () => showAppSettingsDialog(context),
                   ),
                 ],
               ),

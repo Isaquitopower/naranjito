@@ -14,7 +14,13 @@ class VoiceNarratorService {
   VoidCallback? _onCompleteCallback;
   Timer? _fallbackTimer;
 
+  // Real-time speech progress tracking
+  void Function(int offset)? onSpeechProgress;
+  int _lastSpokenWordIndex = 0;
+  int _currentBaseOffset = 0;
+
   double get volume => _volume;
+  int get lastSpokenWordIndex => _currentBaseOffset + _lastSpokenWordIndex;
 
   bool get _isWindows =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
@@ -93,6 +99,10 @@ class VoiceNarratorService {
 
       _tts.setCompletionHandler(_completePendingSpeech);
       _tts.setErrorHandler((_) => _completePendingSpeech());
+      _tts.setProgressHandler((String text, int startOffset, int endOffset, String word) {
+        _lastSpokenWordIndex = startOffset;
+        onSpeechProgress?.call(_currentBaseOffset + startOffset);
+      });
     } catch (_) {
       // Fallback if TTS is unavailable in unit tests or unsupported platform
     }
@@ -109,14 +119,33 @@ class VoiceNarratorService {
     String text, {
     double pitch = 1.15,
     double rate = 0.46,
+    int startCharOffset = 0,
     VoidCallback? onDone,
   }) async {
     await init();
     _fallbackTimer?.cancel();
     _onCompleteCallback = onDone;
 
+    // If volume is muted (0.0), do not play voice audio, finish immediately
+    if (_volume <= 0.001) {
+      final estimatedMs = (text.length * 60).clamp(1500, 8000);
+      _fallbackTimer = Timer(
+        Duration(milliseconds: estimatedMs),
+        _completePendingSpeech,
+      );
+      return;
+    }
+
+    _currentBaseOffset = startCharOffset;
+    _lastSpokenWordIndex = 0;
+
+    // Slice text from the exact character offset if resuming mid-sentence
+    final textToSpeak = (startCharOffset > 0 && startCharOffset < text.length)
+        ? text.substring(startCharOffset).trimLeft()
+        : text;
+
     // Safety timer on Windows (or if TTS audio device is unavailable) so story beats never hang
-    final estimatedMs = (text.length * 75).clamp(2000, 14000);
+    final estimatedMs = (textToSpeak.length * 75).clamp(2000, 14000);
     _fallbackTimer = Timer(
       Duration(milliseconds: estimatedMs),
       _completePendingSpeech,
@@ -130,13 +159,27 @@ class VoiceNarratorService {
       await _tts.setVolume(_volume);
       await _tts.setPitch(pitch);
       await _tts.setSpeechRate(rate);
-      await _tts.speak(text);
+      await _tts.speak(textToSpeak);
     } catch (_) {
       _completePendingSpeech();
     }
   }
 
+  /// Pauses and returns the exact character offset where narration was paused
+  int pauseNarration() {
+    _fallbackTimer?.cancel();
+    _fallbackTimer = null;
+    _onCompleteCallback = null;
+    _isCurrentlySpeaking = false;
+    try {
+      _tts.stop();
+    } catch (_) {}
+    return _currentBaseOffset + _lastSpokenWordIndex;
+  }
+
   Future<void> stop() async {
+    _currentBaseOffset = 0;
+    _lastSpokenWordIndex = 0;
     _fallbackTimer?.cancel();
     _fallbackTimer = null;
     _onCompleteCallback = null;
