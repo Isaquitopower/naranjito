@@ -42,7 +42,48 @@ class VoiceNarratorService {
           IosTextToSpeechAudioMode.defaultMode,
         );
       }
-      await _tts.setLanguage('es-MX');
+
+      // Best effort language matching across platforms (es-MX first, then es)
+      var langSet = await _tts.setLanguage('es-MX');
+      if (langSet != 1) {
+        langSet = await _tts.setLanguage('es-ES');
+      }
+      if (langSet != 1) {
+        await _tts.setLanguage('es');
+      }
+
+      // On Windows / Desktop, search available voices to find Mexican or Spanish voices
+      if (_isWindows) {
+        try {
+          final voices = await _tts.getVoices;
+          if (voices is List && voices.isNotEmpty) {
+            dynamic bestVoice;
+            for (final v in voices) {
+              if (v is Map) {
+                final locale = (v['locale'] ?? '').toString().toLowerCase();
+                final name = (v['name'] ?? '').toString().toLowerCase();
+                // Priority 1: es-mx / Sabina / Raul / Dalia / Jorge
+                if (locale.contains('es-mx') || locale.contains('es_mx') || name.contains('mexico') || name.contains('sabina') || name.contains('raul') || name.contains('dalia')) {
+                  bestVoice = v;
+                  break;
+                }
+                // Priority 2: any Spanish voice (es-es, es-us, Helena, Laura, Pablo, etc.)
+                if (bestVoice == null && (locale.startsWith('es') || name.contains('spanish') || name.contains('español') || name.contains('helena') || name.contains('laura') || name.contains('pablo'))) {
+                  bestVoice = v;
+                }
+              }
+            }
+            if (bestVoice != null && bestVoice is Map) {
+              final voiceMap = <String, String>{
+                'name': bestVoice['name']?.toString() ?? '',
+                'locale': bestVoice['locale']?.toString() ?? '',
+              };
+              await _tts.setVoice(voiceMap);
+            }
+          }
+        } catch (_) {}
+      }
+
       await _tts.setSpeechRate(0.46); // Calm, clear pace for kindergarten kids
       await _tts.setPitch(1.15); // Warm, friendly storyteller tone
       await _tts.setVolume(_volume);

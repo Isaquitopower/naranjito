@@ -23,7 +23,9 @@ class StoryReaderScreen extends StatefulWidget {
 class _StoryReaderScreenState extends State<StoryReaderScreen>
     with TickerProviderStateMixin {
   int _sceneIndex = 0;
+  int _beatIndex = 0;
   bool _isSpeaking = false;
+  bool _isPaused = false;
   bool _narrationCompletedForScene = false;
   int _playbackSessionId = 0;
   Timer? _autoAdvanceTimer;
@@ -67,21 +69,57 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     super.dispose();
   }
 
-  Future<void> _playCurrentSceneScript() async {
+  void _togglePause() {
+    if (_isPaused) {
+      // Resume
+      setState(() {
+        _isPaused = false;
+      });
+      if (_narrationCompletedForScene) {
+        // Resume auto-advance timer if scene was finished
+        _autoAdvanceTimer = Timer(const Duration(seconds: 3), () {
+          if (!mounted || _isPaused) return;
+          if (_sceneIndex < _scenes.length - 1) {
+            _goToScene(_sceneIndex + 1);
+          } else {
+            _showVisualCelebrationModal();
+          }
+        });
+      } else {
+        // Resume beats from current beat
+        _playCurrentSceneScript(fromBeatIndex: _beatIndex);
+      }
+    } else {
+      // Pause
+      _playbackSessionId++;
+      _autoAdvanceTimer?.cancel();
+      VoiceNarratorService.instance.stop();
+      setState(() {
+        _isPaused = true;
+        _isSpeaking = false;
+      });
+      _game.setActiveSpeaker(null);
+    }
+  }
+
+  Future<void> _playCurrentSceneScript({int fromBeatIndex = 0}) async {
     _autoAdvanceTimer?.cancel();
     final sessionId = ++_playbackSessionId;
     await VoiceNarratorService.instance.stop();
 
-    if (!mounted) return;
+    if (!mounted || _isPaused) return;
     final scene = _scenes[_sceneIndex];
 
     setState(() {
+      _beatIndex = fromBeatIndex;
       _isSpeaking = true;
       _narrationCompletedForScene = false;
     });
 
-    for (final beat in scene.beats) {
-      if (!mounted || sessionId != _playbackSessionId) return;
+    for (var i = fromBeatIndex; i < scene.beats.length; i++) {
+      if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
+      _beatIndex = i;
+      final beat = scene.beats[i];
 
       // Update each character's exact pose and position for this beat
       _game.applyVoiceBeat(beat);
@@ -99,13 +137,13 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
       );
 
       await completer.future;
-      if (!mounted || sessionId != _playbackSessionId) return;
+      if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
 
       // Natural pause between story beats
       await Future<void>.delayed(const Duration(milliseconds: 350));
     }
 
-    if (!mounted || sessionId != _playbackSessionId) return;
+    if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
 
     setState(() {
       _isSpeaking = false;
@@ -115,7 +153,7 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
 
     // Linear story auto-advance after a short pause
     _autoAdvanceTimer = Timer(const Duration(seconds: 4), () {
-      if (!mounted || sessionId != _playbackSessionId) return;
+      if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
       if (_sceneIndex < _scenes.length - 1) {
         _goToScene(_sceneIndex + 1);
       } else {
@@ -163,6 +201,8 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
 
     setState(() {
       _sceneIndex = newIndex;
+      _beatIndex = 0;
+      _isPaused = false;
       _narrationCompletedForScene = false;
     });
     await _game.loadScene(newIndex);
@@ -518,8 +558,6 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
 
   @override
   Widget build(BuildContext context) {
-    final isLastScene = _sceneIndex == _scenes.length - 1;
-
     return Scaffold(
       body: Stack(
         children: [
@@ -627,52 +665,32 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
             ),
           ),
 
-          // 3. Bottom Left & Right Linear Navigation Arrows (Pure icons, zero text)
+          // 3. Bottom-Right Pause / Play Button
           Align(
-            alignment: Alignment.bottomCenter,
+            alignment: Alignment.bottomRight,
             child: SafeArea(
               top: false,
+              left: false,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 0, 24, 18),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    if (_sceneIndex > 0)
-                      _RoundKidsButton(
-                        icon: Icons.arrow_back_rounded,
-                        color: const Color(0xFF29B6F6),
-                        size: 68,
-                        onTap: () => _goToScene(_sceneIndex - 1),
-                      )
-                    else
-                      const SizedBox(width: 68),
-
-                    AnimatedBuilder(
-                      animation: _pulseController,
-                      builder: (context, child) {
-                        final scale = _narrationCompletedForScene
-                            ? 1.0 + (_pulseController.value * 0.16)
-                            : 1.0;
-                        return Transform.scale(scale: scale, child: child);
-                      },
-                      child: _RoundKidsButton(
-                        icon: isLastScene
-                            ? Icons.star_rounded
-                            : Icons.arrow_forward_rounded,
-                        color: isLastScene
-                            ? const Color(0xFF66BB6A)
-                            : const Color(0xFFFF8F00),
-                        size: 74,
-                        onTap: () {
-                          if (isLastScene) {
-                            _showVisualCelebrationModal();
-                          } else {
-                            _goToScene(_sceneIndex + 1);
-                          }
-                        },
-                      ),
-                    ),
-                  ],
+                padding: const EdgeInsets.fromLTRB(0, 0, 24, 20),
+                child: AnimatedBuilder(
+                  animation: _pulseController,
+                  builder: (context, child) {
+                    final scale = _isPaused
+                        ? 1.0 + (_pulseController.value * 0.12)
+                        : 1.0;
+                    return Transform.scale(scale: scale, child: child);
+                  },
+                  child: _RoundKidsButton(
+                    icon: _isPaused
+                        ? Icons.play_arrow_rounded
+                        : Icons.pause_rounded,
+                    color: _isPaused
+                        ? const Color(0xFF43A047)
+                        : const Color(0xFFFF9800),
+                    size: 72,
+                    onTap: _togglePause,
+                  ),
                 ),
               ),
             ),
