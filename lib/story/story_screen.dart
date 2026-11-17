@@ -121,15 +121,14 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     });
     _progressNotifier.value = _currentGlobalProgress;
 
-    await _game.loadScene(sceneIdx);
-    if (!mounted) return;
+    if (sceneIdx != _game.currentSceneIndex) {
+      await _game.loadScene(sceneIdx, skipEntranceAnimations: true);
+      if (!mounted) return;
+    }
 
     if (_isPaused) {
-      // Just apply pose of that beat without speaking while paused
-      final scene = _scenes[sceneIdx];
-      if (beatIdx < scene.beats.length) {
-        _game.applyVoiceBeat(scene.beats[beatIdx]);
-      }
+      // Apply cumulative pose & exact positions up to beatIdx without speaking while paused
+      _game.applyBeatStateUpTo(beatIdx, animateMovement: false);
     } else {
       _playCurrentSceneScript(
         fromBeatIndex: beatIdx,
@@ -198,7 +197,7 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
 
     final delay = isLastScene
         ? const Duration(milliseconds: 450)
-        : const Duration(milliseconds: 1400);
+        : const Duration(milliseconds: 500);
     _autoAdvanceTimer = Timer(delay, () {
       if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
       if (!isLastScene) {
@@ -211,10 +210,11 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
 
   void _togglePause() {
     if (_isPaused) {
-      // Resume both narration and music cleanly
+      // Resume both narration, music, and character animations smoothly
       setState(() {
         _isPaused = false;
       });
+      _game.setStoryPaused(false);
       unawaited(SoundtrackService.instance.resumeMusic());
 
       if (_didSeekWhilePaused) {
@@ -229,7 +229,7 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
         _autoAdvanceTimer = Timer(
           isLastScene
               ? const Duration(milliseconds: 450)
-              : const Duration(milliseconds: 1400),
+              : const Duration(milliseconds: 500),
           () {
             if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
             if (!isLastScene) {
@@ -255,18 +255,18 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
         }
       }
     } else {
-      // Pause both narration (exact millisecond) and background music
+      // Pause narration, background music, and freeze character positions in place
       if (!_isWaitingAudioCompleter) {
         _playbackSessionId++;
       }
       _autoAdvanceTimer?.cancel();
       unawaited(VoiceNarratorService.instance.pause());
       unawaited(SoundtrackService.instance.pauseMusic());
+      _game.setStoryPaused(true);
       setState(() {
         _isPaused = true;
         _didSeekWhilePaused = false;
       });
-      _game.setActiveSpeaker(null);
     }
   }
 
@@ -295,8 +295,11 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
       _progressNotifier.value = _currentGlobalProgress;
       final beat = scene.beats[i];
 
-      // Update each character's exact pose and position for this beat
-      _game.applyVoiceBeat(beat);
+      // Apply cumulative poses and positions smoothly for this beat
+      _game.applyBeatStateUpTo(
+        i,
+        animateMovement: i > fromBeatIndex || fromCharOffset == 0,
+      );
 
       final startOffset = (i == fromBeatIndex) ? fromCharOffset : 0;
       _charOffset = startOffset;
@@ -348,6 +351,7 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
       _isPaused = false;
       _didSeekWhilePaused = false;
     });
+    _game.setStoryPaused(false);
     unawaited(SoundtrackService.instance.resumeMusic());
     _game.setActiveSpeaker(speakerId);
 
@@ -382,6 +386,7 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
       _narrationCompletedForScene = false;
     });
     _progressNotifier.value = _currentGlobalProgress;
+    _game.setStoryPaused(false);
     unawaited(SoundtrackService.instance.resumeMusic());
     await _game.loadScene(newIndex);
     if (!mounted) return;
@@ -392,6 +397,7 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     _resolvePendingBeatCompleter();
     _playbackSessionId++;
     _autoAdvanceTimer?.cancel();
+    _game.setStoryPaused(false);
     _game.setActiveSpeaker(null);
     _game.triggerAllCharactersDance();
 

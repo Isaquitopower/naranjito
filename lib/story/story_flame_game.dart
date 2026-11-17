@@ -76,17 +76,32 @@ class StoryFlameGame extends FlameGame {
   }
 
   int _currentSceneIndex = 0;
+  int _currentBeatIndex = 0;
   String? _activeSpeakerId;
   String? _lastSpeakerId;
+  bool _isStoryPaused = false;
+  Vector2 _lastBuiltSize = Vector2.zero();
   late StoryBackdropComponent _backdrop;
   final List<Component> _sceneComponents = [];
 
   bool _isLoaded = false;
 
+  int get currentSceneIndex => _currentSceneIndex;
+  bool get isStoryPaused => _isStoryPaused;
+
   List<StorySceneData> get _scenes => getStoryScenes(storyIndex);
 
   @override
   Color backgroundColor() => const Color(0xFFFFCC80);
+
+  void setStoryPaused(bool paused) {
+    _isStoryPaused = paused;
+    for (final comp in _sceneComponents) {
+      if (comp is StoryCharacterComponent) {
+        comp.isPaused = paused;
+      }
+    }
+  }
 
   void setActiveSpeaker(String? speakerId) {
     _activeSpeakerId = speakerId;
@@ -101,8 +116,78 @@ class StoryFlameGame extends FlameGame {
     }
   }
 
+  /// Applies cumulative poses and positions up through [targetBeatIndex] in the active scene.
+  void applyBeatStateUpTo(int targetBeatIndex, {bool animateMovement = true}) {
+    final scene = _scenes[_currentSceneIndex];
+    if (scene.beats.isEmpty) return;
+    final clampedIndex = targetBeatIndex.clamp(0, scene.beats.length - 1);
+    _currentBeatIndex = clampedIndex;
+
+    final cumulativePoses = <String, CharacterPoseSpec>{};
+    final cumulativePositions = <String, Offset>{};
+    for (final placement in scene.characters) {
+      cumulativePoses[placement.characterId] = placement.initialPose;
+      cumulativePositions[placement.characterId] = placement.normalizedPosition;
+    }
+
+    for (var i = 0; i <= clampedIndex; i++) {
+      final b = scene.beats[i];
+      cumulativePoses.addAll(b.poseChanges);
+      cumulativePositions.addAll(b.positionChanges);
+    }
+
+    final currentBeat = scene.beats[clampedIndex];
+    setActiveSpeaker(currentBeat.speakerId);
+
+    for (final comp in _sceneComponents) {
+      if (comp is StoryCharacterComponent) {
+        final targetPose = cumulativePoses[comp.characterId];
+        if (targetPose != null) {
+          comp.updatePose(
+            targetPose,
+            newSheetImage: _sharedImageCache[targetPose.sheetFileName],
+            animate: animateMovement,
+          );
+        }
+
+        final targetNormPos = cumulativePositions[comp.characterId];
+        if (targetNormPos != null && size.x > 0 && size.y > 0) {
+          final worldPos =
+              Vector2(size.x * targetNormPos.dx, size.y * targetNormPos.dy);
+          if (animateMovement) {
+            if (currentBeat.positionChanges.containsKey(comp.characterId) ||
+                (comp.targetX - worldPos.x).abs() > 1.0 ||
+                (comp.targetY - worldPos.y).abs() > 1.0) {
+              comp.moveToNormalized(worldPos);
+            }
+          } else {
+            comp.snapToPosition(worldPos);
+          }
+        }
+      }
+    }
+
+    if (clampedIndex > 0) {
+      for (var i = clampedIndex - 1; i >= 0; i--) {
+        final prevSpeaker = scene.beats[i].speakerId;
+        if (prevSpeaker != 'narrador') {
+          _lastSpeakerId = prevSpeaker;
+          break;
+        }
+      }
+    }
+    _updateCharacterFacings(beat: currentBeat);
+    if (currentBeat.speakerId != 'narrador') {
+      _lastSpeakerId = currentBeat.speakerId;
+    }
+  }
+
   /// Applies exact character poses and optional position shifts for the current story beat
-  void applyVoiceBeat(VoiceBeat beat) {
+  void applyVoiceBeat(VoiceBeat beat, {int? beatIndex}) {
+    if (beatIndex != null) {
+      applyBeatStateUpTo(beatIndex, animateMovement: true);
+      return;
+    }
     setActiveSpeaker(beat.speakerId);
 
     for (final comp in _sceneComponents) {
@@ -155,24 +240,29 @@ class StoryFlameGame extends FlameGame {
   @override
   void onGameResize(Vector2 size) {
     super.onGameResize(size);
-    if (_isLoaded) {
-      _buildScene(_currentSceneIndex);
+    if (!_isLoaded || size.x == 0 || size.y == 0) return;
+    // Ignore LayoutBuilder rebuilds from parent setState when viewport size hasn't changed
+    if (_lastBuiltSize.x > 0 && (size - _lastBuiltSize).length < 1.0) {
+      return;
     }
+    _buildScene(_currentSceneIndex, skipEntranceAnimations: true);
+    applyBeatStateUpTo(_currentBeatIndex, animateMovement: false);
   }
 
-  Future<void> loadScene(int index) async {
+  Future<void> loadScene(int index, {bool skipEntranceAnimations = false}) async {
     if (index < 0 || index >= _scenes.length) return;
     _currentSceneIndex = index;
+    _currentBeatIndex = 0;
     if (!_isLoaded) return;
 
     await preloadStoryAssets(storyIndex, firstSceneOnly: false);
 
     final bgImage = _sharedImageCache[_scenes[index].backgroundAsset];
     _backdrop.updateBackground(bgImage);
-    _buildScene(index);
+    _buildScene(index, skipEntranceAnimations: skipEntranceAnimations);
   }
 
-  void _buildScene(int index) {
+  void _buildScene(int index, {bool skipEntranceAnimations = false}) {
     for (final comp in _sceneComponents) {
       comp.removeFromParent();
     }
@@ -180,6 +270,7 @@ class StoryFlameGame extends FlameGame {
     _lastSpeakerId = null;
 
     if (size.x == 0 || size.y == 0) return;
+    _lastBuiltSize = size.clone();
 
     final scene = _scenes[index];
 
@@ -228,6 +319,8 @@ class StoryFlameGame extends FlameGame {
         spokenPhrase: placement.spokenPhrase,
         voicePitch: placement.voicePitch,
         isTalking: _activeSpeakerId == placement.characterId,
+        isPaused: _isStoryPaused,
+        skipEntranceAnimations: skipEntranceAnimations,
         onCharacterTapped: (phrase, pitch, charId, tapPos) {
           spawnCelebrationParticles(tapPos);
           onSpeakRequest?.call(phrase, pitch, charId);
@@ -529,6 +622,8 @@ class StoryCharacterComponent extends PositionComponent with TapCallbacks {
   final String spokenPhrase;
   final double voicePitch;
   bool isTalking;
+  bool isPaused;
+  final bool skipEntranceAnimations;
   final void Function(
     String phrase,
     double pitch,
@@ -537,13 +632,13 @@ class StoryCharacterComponent extends PositionComponent with TapCallbacks {
   ) onCharacterTapped;
 
   late final SpriteComponent _spriteComponent;
-  bool _isSpriteMounted = false;
   bool _shouldFaceRight = true;
   double _idleTimer = 0;
   late double _baseY;
   late double _baseX;
 
   double get targetX => _baseX;
+  double get targetY => _baseY;
 
   StoryCharacterComponent({
     required this.characterId,
@@ -556,6 +651,8 @@ class StoryCharacterComponent extends PositionComponent with TapCallbacks {
     required this.spokenPhrase,
     required this.voicePitch,
     required this.isTalking,
+    this.isPaused = false,
+    this.skipEntranceAnimations = false,
     required this.onCharacterTapped,
   })  : _currentPose = initialPose,
         super(
@@ -566,15 +663,20 @@ class StoryCharacterComponent extends PositionComponent with TapCallbacks {
         ) {
     _baseY = position.y;
     _baseX = position.x;
+    _spriteComponent = SpriteComponent(
+      sprite: _createSpriteForPose(_currentPose),
+      size: size.clone(),
+      position: size / 2,
+      anchor: Anchor.center,
+    );
+    _applyMirrorScale();
   }
 
   /// Sets whether this character should visually face toward the right (`true`)
   /// or toward the left (`false`), applying a horizontal mirror effect when needed.
   void setFacingDirection({required bool faceRight}) {
     _shouldFaceRight = faceRight;
-    if (_isSpriteMounted) {
-      _applyMirrorScale();
-    }
+    _applyMirrorScale();
   }
 
   void _applyMirrorScale() {
@@ -593,13 +695,15 @@ class StoryCharacterComponent extends PositionComponent with TapCallbacks {
 
   /// Dynamically switches the character's pose to the exact cell in the collage
   /// with a lively squash-and-stretch transition.
-  void updatePose(CharacterPoseSpec newPose, {ui.Image? newSheetImage}) {
+  void updatePose(
+    CharacterPoseSpec newPose, {
+    ui.Image? newSheetImage,
+    bool animate = true,
+  }) {
     if (_currentPose.sheetFileName == newPose.sheetFileName &&
         _currentPose.col == newPose.col &&
         _currentPose.row == newPose.row) {
-      if (_isSpriteMounted) {
-        _applyMirrorScale();
-      }
+      _applyMirrorScale();
       return;
     }
     if (newSheetImage != null) {
@@ -614,27 +718,34 @@ class StoryCharacterComponent extends PositionComponent with TapCallbacks {
     _spriteComponent.position = size / 2;
     _applyMirrorScale();
 
-    add(
-      SequenceEffect([
-        ScaleEffect.to(
-          Vector2(1.08, 0.93),
-          EffectController(duration: 0.09, curve: Curves.easeOut),
-        ),
-        ScaleEffect.to(
-          Vector2(0.96, 1.05),
-          EffectController(duration: 0.11, curve: Curves.easeOut),
-        ),
-        ScaleEffect.to(
-          Vector2.all(1.0),
-          EffectController(duration: 0.18, curve: Curves.easeOutBack),
-        ),
-      ]),
-    );
+    if (animate && isMounted) {
+      add(
+        SequenceEffect([
+          ScaleEffect.to(
+            Vector2(1.08, 0.93),
+            EffectController(duration: 0.09, curve: Curves.easeOut),
+          ),
+          ScaleEffect.to(
+            Vector2(0.96, 1.05),
+            EffectController(duration: 0.11, curve: Curves.easeOut),
+          ),
+          ScaleEffect.to(
+            Vector2.all(1.0),
+            EffectController(duration: 0.18, curve: Curves.easeOutBack),
+          ),
+        ]),
+      );
+    }
   }
 
   void moveToNormalized(Vector2 newPos) {
+    final distX = (newPos.x - _baseX).abs();
+    final distY = (newPos.y - _baseY).abs();
     _baseX = newPos.x;
     _baseY = newPos.y;
+    if (distX <= 1.0 && distY <= 1.0) return;
+
+    removeWhere((c) => c is MoveToEffect);
     add(
       MoveToEffect(
         newPos,
@@ -643,19 +754,21 @@ class StoryCharacterComponent extends PositionComponent with TapCallbacks {
     );
   }
 
+  void snapToPosition(Vector2 newPos) {
+    removeWhere((c) => c is MoveToEffect);
+    _baseX = newPos.x;
+    _baseY = newPos.y;
+    position.setFrom(newPos);
+  }
+
   @override
   Future<void> onLoad() async {
     await super.onLoad();
 
-    _spriteComponent = SpriteComponent(
-      sprite: _createSpriteForPose(_currentPose),
-      size: size.clone(),
-      position: size / 2,
-      anchor: Anchor.center,
-    );
-    _isSpriteMounted = true;
     _applyMirrorScale();
     await add(_spriteComponent);
+
+    if (skipEntranceAnimations) return;
 
     if (initialEmotion == 'appear') {
       scale = Vector2.zero();
@@ -694,7 +807,14 @@ class StoryCharacterComponent extends PositionComponent with TapCallbacks {
   }
 
   @override
+  void updateTree(double dt) {
+    if (isPaused) return;
+    super.updateTree(dt);
+  }
+
+  @override
   void update(double dt) {
+    if (isPaused) return;
     super.update(dt);
     _idleTimer += dt;
 

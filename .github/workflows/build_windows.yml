@@ -52,6 +52,9 @@ jobs:
             }
           }
 
+          $flagName = "installed_$($env:GITHUB_SHA).flag"
+          Set-Content -Path "$releaseDir/$flagName" -Value $env:GITHUB_SHA -Encoding UTF8
+
           Compress-Archive -Path "$releaseDir/*" -DestinationPath "Naranjito-Windows-Release.zip" -Force
 
           $issContent = @"
@@ -86,6 +89,22 @@ jobs:
           function PostMessage(hWnd: HWND; Msg: Cardinal; wParam, lParam: Longint): BOOL;
             external 'PostMessageW@user32.dll stdcall';
 
+          function InitializeSetup(): Boolean;
+          var
+            InstalledExe, InstalledFlag: String;
+            ResultCode: Integer;
+          begin
+            InstalledExe := ExpandConstant('{autopf}\Naranjito\naranjito.exe');
+            InstalledFlag := ExpandConstant('{autopf}\Naranjito\$flagName');
+            if FileExists(InstalledExe) and FileExists(InstalledFlag) then
+            begin
+              Exec(InstalledExe, '', ExpandConstant('{autopf}\Naranjito'), SW_SHOWNORMAL, ewNoWait, ResultCode);
+              Result := False;
+              Exit;
+            end;
+            Result := True;
+          end;
+
           procedure CurPageChanged(CurPageID: Integer);
           begin
             if CurPageID = wpReady then
@@ -101,9 +120,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Naranjito-Windows-EXE
-          path: |
-            Naranjito-Windows.exe
-            Naranjito-Windows-Release.zip
+          path: Naranjito-Windows.exe
 
       - name: Publish Windows EXE to GitHub Releases
         uses: softprops/action-gh-release@v2
