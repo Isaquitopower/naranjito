@@ -7791,3 +7791,29 @@ List<StorySceneData> getStoryScenes(int storyIndex) {
       return crayonStoryScenes;
   }
 }
+
+/// Returns the spoken completion message for a given [storyIndex].
+String getStoryCompletionVoice(int storyIndex) {
+  return switch (storyIndex) {
+    9 =>
+      '¡Muy bien! Pablito no aceptó regalos de un desconocido y fue inmediatamente con su mamá para contarle todo y estar seguro.',
+    8 =>
+      '¡Muy bien! Florecita usó su voz fuerte y valiente para decir que no quería cosquillas y todos aprendieron a respetar sus límites.',
+    7 =>
+      '¡Muy bien! Pablito aprendió a pedir el carrito por favor con respeto y a esperar su turno mientras jugaban juntos.',
+    6 =>
+      '¡Muy bien! Florecita aprendió a respirar profundo como un globo y a buscar una solución con tranquilidad junto a Pablito.',
+    5 =>
+      '¡Muy bien! Pablito y Florecita aprendieron que los mejores juegos son aquellos en los que todos nos cuidamos y podemos sonreír.',
+    4 =>
+      '¡Muy bien! Florecita y Pablito invitaron a jugar a la niña nueva y ahora tienen una gran amiga.',
+    3 =>
+      '¡Muy bien! Pablito aprendió que pedir ayuda a un adulto de confianza también es de valientes.',
+    2 =>
+      '¡Muy bien! Florecita cuidó su burbuja personal con respeto y chocó esos cinco con su tía.',
+    1 =>
+      '¡Muy bien! Pablito conoció su nube de tormenta y construyó una cueva gigante muy divertida con Florecita.',
+    _ =>
+      '¡Muy bien! Florecita fue muy valiente y honesta al hablar con su maestra.',
+  };
+}

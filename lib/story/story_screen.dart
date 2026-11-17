@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flame/game.dart';
 import 'package:flutter/material.dart';
@@ -26,10 +27,22 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
   int _beatIndex = 0;
   int _charOffset = 0;
   bool _isPaused = false;
+  bool _isWaitingAudioCompleter = false;
+  bool _didSeekWhilePaused = false;
   bool _narrationCompletedForScene = false;
   int _playbackSessionId = 0;
   Timer? _autoAdvanceTimer;
+  Completer<void>? _activeBeatCompleter;
   final ValueNotifier<double> _progressNotifier = ValueNotifier<double>(0.0);
+
+  void _resolvePendingBeatCompleter() {
+    _isWaitingAudioCompleter = false;
+    final completer = _activeBeatCompleter;
+    _activeBeatCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete();
+    }
+  }
 
   late final StoryFlameGame _game;
   late final AnimationController _pulseController;
@@ -86,16 +99,25 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     _seekToSceneBeatAndChar(_scenes.length - 1, _scenes.last.beats.length - 1, 0);
   }
 
-  Future<void> _seekToSceneBeatAndChar(int sceneIdx, int beatIdx, int charOffset) async {
+  Future<void> _seekToSceneBeatAndChar(
+    int sceneIdx,
+    int beatIdx,
+    int charOffset,
+  ) async {
+    _resolvePendingBeatCompleter();
     _playbackSessionId++;
     _autoAdvanceTimer?.cancel();
-    VoiceNarratorService.instance.stop();
+    await VoiceNarratorService.instance.stop();
 
+    if (!mounted) return;
     setState(() {
       _sceneIndex = sceneIdx;
       _beatIndex = beatIdx;
       _charOffset = charOffset;
       _narrationCompletedForScene = false;
+      if (_isPaused) {
+        _didSeekWhilePaused = true;
+      }
     });
     _progressNotifier.value = _currentGlobalProgress;
 
@@ -109,7 +131,10 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
         _game.applyVoiceBeat(scene.beats[beatIdx]);
       }
     } else {
-      _playCurrentSceneScript(fromBeatIndex: beatIdx, fromCharOffset: charOffset);
+      _playCurrentSceneScript(
+        fromBeatIndex: beatIdx,
+        fromCharOffset: charOffset,
+      );
     }
   }
 
@@ -148,44 +173,98 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
   void dispose() {
     VoiceNarratorService.instance.onSpeechProgress = null;
     _progressNotifier.dispose();
+    _resolvePendingBeatCompleter();
     _playbackSessionId++;
     _autoAdvanceTimer?.cancel();
     _pulseController.dispose();
+    if (_isPaused) {
+      unawaited(SoundtrackService.instance.resumeMusic());
+    }
     VoiceNarratorService.instance.stop();
     super.dispose();
   }
 
+  void _completeCurrentScene(int sessionId) {
+    if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
+    final isLastScene = _sceneIndex >= _scenes.length - 1;
+    setState(() {
+      _charOffset = 0;
+      _narrationCompletedForScene = true;
+    });
+    if (isLastScene) {
+      _progressNotifier.value = 1.0;
+    }
+    _game.setActiveSpeaker(null);
+
+    final delay = isLastScene
+        ? const Duration(milliseconds: 450)
+        : const Duration(milliseconds: 1400);
+    _autoAdvanceTimer = Timer(delay, () {
+      if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
+      if (!isLastScene) {
+        _goToScene(_sceneIndex + 1);
+      } else {
+        _showVisualCelebrationModal();
+      }
+    });
+  }
+
   void _togglePause() {
     if (_isPaused) {
-      // Resume
+      // Resume both narration and music cleanly
       setState(() {
         _isPaused = false;
       });
-      if (_narrationCompletedForScene) {
-        // Resume auto-advance timer if scene was finished
-        _autoAdvanceTimer = Timer(const Duration(seconds: 3), () {
-          if (!mounted || _isPaused) return;
-          if (_sceneIndex < _scenes.length - 1) {
-            _goToScene(_sceneIndex + 1);
-          } else {
-            _showVisualCelebrationModal();
-          }
-        });
-      } else {
-        // Resume narration exactly from the saved character offset of the current beat
+      unawaited(SoundtrackService.instance.resumeMusic());
+
+      if (_didSeekWhilePaused) {
+        _didSeekWhilePaused = false;
         _playCurrentSceneScript(
           fromBeatIndex: _beatIndex,
           fromCharOffset: _charOffset,
         );
+      } else if (_narrationCompletedForScene) {
+        final sessionId = _playbackSessionId;
+        final isLastScene = _sceneIndex >= _scenes.length - 1;
+        _autoAdvanceTimer = Timer(
+          isLastScene
+              ? const Duration(milliseconds: 450)
+              : const Duration(milliseconds: 1400),
+          () {
+            if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
+            if (!isLastScene) {
+              _goToScene(_sceneIndex + 1);
+            } else {
+              _showVisualCelebrationModal();
+            }
+          },
+        );
+      } else if (_isWaitingAudioCompleter) {
+        final beats = _scenes[_sceneIndex].beats;
+        if (_beatIndex < beats.length) {
+          _game.setActiveSpeaker(beats[_beatIndex].speakerId);
+        }
+        unawaited(VoiceNarratorService.instance.resume());
+      } else {
+        // Paused during inter-beat gap: resume from the next beat or complete scene
+        final nextBeat = _beatIndex + 1;
+        if (nextBeat < _scenes[_sceneIndex].beats.length) {
+          _playCurrentSceneScript(fromBeatIndex: nextBeat, fromCharOffset: 0);
+        } else {
+          _completeCurrentScene(_playbackSessionId);
+        }
       }
     } else {
-      // Pause exactly where it currently is speaking
-      _playbackSessionId++;
+      // Pause both narration (exact millisecond) and background music
+      if (!_isWaitingAudioCompleter) {
+        _playbackSessionId++;
+      }
       _autoAdvanceTimer?.cancel();
-      final pausedOffset = VoiceNarratorService.instance.pauseNarration();
+      unawaited(VoiceNarratorService.instance.pause());
+      unawaited(SoundtrackService.instance.pauseMusic());
       setState(() {
         _isPaused = true;
-        _charOffset = pausedOffset;
+        _didSeekWhilePaused = false;
       });
       _game.setActiveSpeaker(null);
     }
@@ -196,10 +275,11 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     int fromCharOffset = 0,
   }) async {
     _autoAdvanceTimer?.cancel();
+    _resolvePendingBeatCompleter();
     final sessionId = ++_playbackSessionId;
     await VoiceNarratorService.instance.stop();
 
-    if (!mounted || _isPaused) return;
+    if (!mounted || _isPaused || sessionId != _playbackSessionId) return;
     final scene = _scenes[_sceneIndex];
 
     setState(() {
@@ -222,6 +302,8 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
       _charOffset = startOffset;
 
       final completer = Completer<void>();
+      _activeBeatCompleter = completer;
+      _isWaitingAudioCompleter = true;
       await VoiceNarratorService.instance.speak(
         beat.text,
         pitch: beat.pitch,
@@ -235,6 +317,10 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
       );
 
       await completer.future;
+      if (identical(_activeBeatCompleter, completer)) {
+        _activeBeatCompleter = null;
+      }
+      _isWaitingAudioCompleter = false;
       if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
 
       // Completed this beat normally, reset offset for next beats
@@ -244,23 +330,7 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
       await Future<void>.delayed(const Duration(milliseconds: 350));
     }
 
-    if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
-
-    setState(() {
-      _charOffset = 0;
-      _narrationCompletedForScene = true;
-    });
-    _game.setActiveSpeaker(null);
-
-    // Linear story auto-advance after a short pause
-    _autoAdvanceTimer = Timer(const Duration(seconds: 4), () {
-      if (!mounted || sessionId != _playbackSessionId || _isPaused) return;
-      if (_sceneIndex < _scenes.length - 1) {
-        _goToScene(_sceneIndex + 1);
-      } else {
-        _showVisualCelebrationModal();
-      }
-    });
+    _completeCurrentScene(sessionId);
   }
 
   Future<void> _speakSingleInteraction(
@@ -269,10 +339,16 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     String speakerId = 'narrador',
   }) async {
     _autoAdvanceTimer?.cancel();
+    _resolvePendingBeatCompleter();
     final sessionId = ++_playbackSessionId;
     await VoiceNarratorService.instance.stop();
 
     if (!mounted) return;
+    setState(() {
+      _isPaused = false;
+      _didSeekWhilePaused = false;
+    });
+    unawaited(SoundtrackService.instance.resumeMusic());
     _game.setActiveSpeaker(speakerId);
 
     await VoiceNarratorService.instance.speak(
@@ -291,6 +367,7 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
 
   Future<void> _goToScene(int newIndex) async {
     if (newIndex < 0 || newIndex >= _scenes.length) return;
+    _resolvePendingBeatCompleter();
     _playbackSessionId++;
     _autoAdvanceTimer?.cancel();
     await VoiceNarratorService.instance.stop();
@@ -299,42 +376,26 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
     setState(() {
       _sceneIndex = newIndex;
       _beatIndex = 0;
+      _charOffset = 0;
       _isPaused = false;
+      _didSeekWhilePaused = false;
       _narrationCompletedForScene = false;
     });
+    _progressNotifier.value = _currentGlobalProgress;
+    unawaited(SoundtrackService.instance.resumeMusic());
     await _game.loadScene(newIndex);
     if (!mounted) return;
     _playCurrentSceneScript();
   }
 
   void _showVisualCelebrationModal() {
+    _resolvePendingBeatCompleter();
     _playbackSessionId++;
     _autoAdvanceTimer?.cancel();
     _game.setActiveSpeaker(null);
     _game.triggerAllCharactersDance();
 
-    final completionVoice = switch (widget.storyIndex) {
-      9 =>
-        '¡Muy bien! Pablito no aceptó regalos de un desconocido y fue inmediatamente con su mamá para contarle todo y estar seguro.',
-      8 =>
-        '¡Muy bien! Florecita usó su voz fuerte y valiente para decir que no quería cosquillas y todos aprendieron a respetar sus límites.',
-      7 =>
-        '¡Muy bien! Pablito aprendió a pedir el carrito por favor con respeto y a esperar su turno mientras jugaban juntos.',
-      6 =>
-        '¡Muy bien! Florecita aprendió a respirar profundo como un globo y a buscar una solución con tranquilidad junto a Pablito.',
-      5 =>
-        '¡Muy bien! Pablito y Florecita aprendieron que los mejores juegos son aquellos en los que todos nos cuidamos y podemos sonreír.',
-      4 =>
-        '¡Muy bien! Florecita y Pablito invitaron a jugar a la niña nueva y ahora tienen una gran amiga.',
-      3 =>
-        '¡Muy bien! Pablito aprendió que pedir ayuda a un adulto de confianza también es de valientes.',
-      2 =>
-        '¡Muy bien! Florecita cuidó su burbuja personal con respeto y chocó esos cinco con su tía.',
-      1 =>
-        '¡Muy bien! Pablito conoció su nube de tormenta y construyó una cueva gigante muy divertida con Florecita.',
-      _ =>
-        '¡Muy bien! Florecita fue muy valiente y honesta al hablar con su maestra.',
-    };
+    final completionVoice = getStoryCompletionVoice(widget.storyIndex);
 
     VoiceNarratorService.instance.speak(
       completionVoice,
@@ -346,308 +407,20 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
       context: context,
       barrierDismissible: true,
       builder: (ctx) {
-        return Dialog(
-          backgroundColor: Colors.transparent,
-          child: Container(
-            constraints: const BoxConstraints(maxWidth: 480),
-            padding: const EdgeInsets.all(28),
-            decoration: BoxDecoration(
-              color: const Color(0xFFFFFDF7),
-              borderRadius: BorderRadius.circular(40),
-              border: Border.all(color: const Color(0xFFFF9800), width: 6),
-              boxShadow: const [
-                BoxShadow(
-                  color: Colors.black26,
-                  blurRadius: 24,
-                  offset: Offset(0, 10),
-                ),
-              ],
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // 3 Golden Stars (100% visual, zero text)
-                const Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      Icons.star_rounded,
-                      color: Color(0xFFFFB300),
-                      size: 56,
-                    ),
-                    Icon(
-                      Icons.star_rounded,
-                      color: Color(0xFFFF8F00),
-                      size: 74,
-                    ),
-                    Icon(
-                      Icons.star_rounded,
-                      color: Color(0xFFFFB300),
-                      size: 56,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                // Characters celebrating together in their happy final poses
-                if (widget.storyIndex == 9)
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CharacterPoseWidget(
-                        pose: ParquePoseAtlas.mamaOpenArmsProtectiveHug,
-                        height: 98,
-                      ),
-                      SizedBox(width: 8),
-                      CharacterPoseWidget(
-                        pose: ParquePoseAtlas.pablitoTellingMomEverything,
-                        height: 92,
-                      ),
-                      SizedBox(width: 8),
-                      CharacterPoseWidget(
-                        pose: ParquePoseAtlas.naranjitoArmsOpenBigSmile,
-                        height: 74,
-                      ),
-                      SizedBox(width: 8),
-                      CharacterPoseWidget(
-                        pose: ParquePoseAtlas.florecitaHoldingLemonadeGlass,
-                        height: 92,
-                      ),
-                    ],
-                  )
-                else if (widget.storyIndex == 8)
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CharacterPoseWidget(
-                        pose: CosquillasPoseAtlas.pablitoJumpingJoy,
-                        height: 94,
-                      ),
-                      SizedBox(width: 8),
-                      CharacterPoseWidget(
-                        pose: CosquillasPoseAtlas.florecitaPointingPatioSmiling,
-                        height: 94,
-                      ),
-                      SizedBox(width: 8),
-                      CharacterPoseWidget(
-                        pose: CosquillasPoseAtlas.naranjitoArmsOpenBigSmile,
-                        height: 76,
-                      ),
-                      SizedBox(width: 8),
-                      CharacterPoseWidget(
-                        pose: CosquillasPoseAtlas.companeroInvitingOpenHand,
-                        height: 94,
-                      ),
-                    ],
-                  )
-                else if (widget.storyIndex == 7)
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CharacterPoseWidget(
-                        pose: CarritoPoseAtlas.florecitaSharingCarBothHands,
-                        height: 96,
-                      ),
-                      SizedBox(width: 12),
-                      CharacterPoseWidget(
-                        pose: CarritoPoseAtlas.naranjitoArmsOpenBigSmile,
-                        height: 82,
-                      ),
-                      SizedBox(width: 12),
-                      CharacterPoseWidget(
-                        pose: CarritoPoseAtlas.pablitoHappyThumbsUp,
-                        height: 96,
-                      ),
-                    ],
-                  )
-                else if (widget.storyIndex == 6)
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CharacterPoseWidget(
-                        pose: PiezaPoseAtlas.florecitaDeterminedHappyFist,
-                        height: 96,
-                      ),
-                      SizedBox(width: 12),
-                      CharacterPoseWidget(
-                        pose: PiezaPoseAtlas.naranjitoArmsOpenBigSmile,
-                        height: 82,
-                      ),
-                      SizedBox(width: 12),
-                      CharacterPoseWidget(
-                        pose: PiezaPoseAtlas.pablitoPointingToBlueSofa,
-                        height: 96,
-                      ),
-                    ],
-                  )
-                else if (widget.storyIndex == 5)
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CharacterPoseWidget(
-                        pose: JuegosPoseAtlas.florecitaHappyHandsChest,
-                        height: 96,
-                      ),
-                      SizedBox(width: 12),
-                      CharacterPoseWidget(
-                        pose: JuegosPoseAtlas.naranjitoArmsOpenBigSmile,
-                        height: 82,
-                      ),
-                      SizedBox(width: 12),
-                      CharacterPoseWidget(
-                        pose: JuegosPoseAtlas.pablitoJumpingHappy,
-                        height: 98,
-                      ),
-                    ],
-                  )
-                else if (widget.storyIndex == 4)
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CharacterPoseWidget(
-                        pose: CompaneraPoseAtlas.florecitaWavingHello,
-                        height: 95,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: CompaneraPoseAtlas.companeraArmsWideOpenHappy,
-                        height: 98,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: CompaneraPoseAtlas.naranjitoHappyThumbsUp,
-                        height: 75,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: CompaneraPoseAtlas.pablitoArmsRaisedExcited,
-                        height: 95,
-                      ),
-                    ],
-                  )
-                else if (widget.storyIndex == 3)
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CharacterPoseWidget(
-                        pose: PapalotePoseAtlas.papaHandOnHeartProud,
-                        height: 105,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: PapalotePoseAtlas.pablitoHoldingKiteHappy,
-                        height: 95,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: PapalotePoseAtlas.naranjitoHappyThumbsUp,
-                        height: 75,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: PapalotePoseAtlas.florecitaHappyGratefulHands,
-                        height: 95,
-                      ),
-                    ],
-                  )
-                else if (widget.storyIndex == 2)
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CharacterPoseWidget(
-                        pose: BurbujaPoseAtlas.tiaHighFiveRaised,
-                        height: 105,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: BurbujaPoseAtlas.florecitaHappyHandsCheeks,
-                        height: 95,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: BurbujaPoseAtlas.naranjitoHappyThumbsUp,
-                        height: 75,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: BurbujaPoseAtlas.pablitoJumpingJoy,
-                        height: 95,
-                      ),
-                    ],
-                  )
-                else if (widget.storyIndex == 1)
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CharacterPoseWidget(
-                        pose: NubePoseAtlas.florecitaClappingHappy,
-                        height: 98,
-                      ),
-                      SizedBox(width: 12),
-                      CharacterPoseWidget(
-                        pose: NubePoseAtlas.naranjitoHoldingUmbrella,
-                        height: 82,
-                      ),
-                      SizedBox(width: 12),
-                      CharacterPoseWidget(
-                        pose: NubePoseAtlas.pablitoCarryingCushionHappy,
-                        height: 98,
-                      ),
-                    ],
-                  )
-                else
-                  const Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CharacterPoseWidget(
-                        pose: CrayonPoseAtlas.maestraProudCongratulating,
-                        height: 105,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: CrayonPoseAtlas.florecitaHappyGrateful,
-                        height: 95,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: CrayonPoseAtlas.naranjitoThumbsUp,
-                        height: 75,
-                      ),
-                      SizedBox(width: 10),
-                      CharacterPoseWidget(
-                        pose: CrayonPoseAtlas.pablitoWavingHappy,
-                        height: 95,
-                      ),
-                    ],
-                  ),
-                const SizedBox(height: 24),
-                // Giant icon-only buttons (Replay or Go Home)
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    _RoundKidsButton(
-                      icon: Icons.replay_rounded,
-                      color: const Color(0xFFFF9800),
-                      size: 78,
-                      onTap: () {
-                        Navigator.of(ctx).pop();
-                        _goToScene(0);
-                      },
-                    ),
-                    _RoundKidsButton(
-                      icon: Icons.home_rounded,
-                      color: const Color(0xFF43A047),
-                      size: 78,
-                      onTap: () {
-                        VoiceNarratorService.instance.stop();
-                        Navigator.of(ctx).pop();
-                        Navigator.of(context).pop();
-                      },
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
+        return _CelebrationAnimatedDialog(
+          storyIndex: widget.storyIndex,
+          onReplay: () {
+            Navigator.of(ctx).pop();
+            _goToScene(0);
+          },
+          onHome: () {
+            if (_isPaused) {
+              unawaited(SoundtrackService.instance.resumeMusic());
+            }
+            VoiceNarratorService.instance.stop();
+            Navigator.of(ctx).pop();
+            Navigator.of(context).pop();
+          },
         );
       },
     );
@@ -684,7 +457,11 @@ class _StoryReaderScreenState extends State<StoryReaderScreen>
                     color: const Color(0xFFFF7043),
                     size: 62,
                     onTap: () {
+                      _resolvePendingBeatCompleter();
                       _playbackSessionId++;
+                      if (_isPaused) {
+                        unawaited(SoundtrackService.instance.resumeMusic());
+                      }
                       VoiceNarratorService.instance.stop();
                       Navigator.of(context).pop();
                     },
@@ -855,5 +632,361 @@ class _RoundKidsButton extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class _CelebrationAnimatedDialog extends StatefulWidget {
+  final int storyIndex;
+  final VoidCallback onReplay;
+  final VoidCallback onHome;
+
+  const _CelebrationAnimatedDialog({
+    required this.storyIndex,
+    required this.onReplay,
+    required this.onHome,
+  });
+
+  @override
+  State<_CelebrationAnimatedDialog> createState() =>
+      _CelebrationAnimatedDialogState();
+}
+
+class _CelebrationAnimatedDialogState extends State<_CelebrationAnimatedDialog>
+    with TickerProviderStateMixin {
+  late final AnimationController _entryController;
+  late final AnimationController _celebrateController;
+  late final Animation<double> _entryScale;
+
+  @override
+  void initState() {
+    super.initState();
+    _entryController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 520),
+    )..forward();
+    _entryScale = CurvedAnimation(
+      parent: _entryController,
+      curve: Curves.elasticOut,
+    );
+    _celebrateController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 3200),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _entryController.dispose();
+    _celebrateController.dispose();
+    super.dispose();
+  }
+
+  List<({CharacterPoseSpec pose, double height})> _charactersForStory(
+    int storyIndex,
+  ) {
+    return switch (storyIndex) {
+      9 => const [
+          (pose: ParquePoseAtlas.mamaOpenArmsProtectiveHug, height: 94),
+          (pose: ParquePoseAtlas.pablitoTellingMomEverything, height: 88),
+          (pose: ParquePoseAtlas.naranjitoArmsOpenBigSmile, height: 72),
+          (pose: ParquePoseAtlas.florecitaHoldingLemonadeGlass, height: 88),
+        ],
+      8 => const [
+          (pose: CosquillasPoseAtlas.pablitoJumpingJoy, height: 90),
+          (pose: CosquillasPoseAtlas.florecitaPointingPatioSmiling, height: 90),
+          (pose: CosquillasPoseAtlas.naranjitoArmsOpenBigSmile, height: 74),
+          (pose: CosquillasPoseAtlas.companeroInvitingOpenHand, height: 90),
+        ],
+      7 => const [
+          (pose: CarritoPoseAtlas.florecitaSharingCarBothHands, height: 92),
+          (pose: CarritoPoseAtlas.naranjitoArmsOpenBigSmile, height: 80),
+          (pose: CarritoPoseAtlas.pablitoHappyThumbsUp, height: 92),
+        ],
+      6 => const [
+          (pose: PiezaPoseAtlas.florecitaDeterminedHappyFist, height: 92),
+          (pose: PiezaPoseAtlas.naranjitoArmsOpenBigSmile, height: 80),
+          (pose: PiezaPoseAtlas.pablitoPointingToBlueSofa, height: 92),
+        ],
+      5 => const [
+          (pose: JuegosPoseAtlas.florecitaHappyHandsChest, height: 92),
+          (pose: JuegosPoseAtlas.naranjitoArmsOpenBigSmile, height: 80),
+          (pose: JuegosPoseAtlas.pablitoJumpingHappy, height: 94),
+        ],
+      4 => const [
+          (pose: CompaneraPoseAtlas.florecitaWavingHello, height: 92),
+          (pose: CompaneraPoseAtlas.companeraArmsWideOpenHappy, height: 94),
+          (pose: CompaneraPoseAtlas.naranjitoHappyThumbsUp, height: 74),
+          (pose: CompaneraPoseAtlas.pablitoArmsRaisedExcited, height: 92),
+        ],
+      3 => const [
+          (pose: PapalotePoseAtlas.papaHandOnHeartProud, height: 98),
+          (pose: PapalotePoseAtlas.pablitoHoldingKiteHappy, height: 90),
+          (pose: PapalotePoseAtlas.naranjitoHappyThumbsUp, height: 74),
+          (pose: PapalotePoseAtlas.florecitaHappyGratefulHands, height: 90),
+        ],
+      2 => const [
+          (pose: BurbujaPoseAtlas.tiaHighFiveRaised, height: 98),
+          (pose: BurbujaPoseAtlas.florecitaHappyHandsCheeks, height: 90),
+          (pose: BurbujaPoseAtlas.naranjitoHappyThumbsUp, height: 74),
+          (pose: BurbujaPoseAtlas.pablitoJumpingJoy, height: 90),
+        ],
+      1 => const [
+          (pose: NubePoseAtlas.florecitaClappingHappy, height: 94),
+          (pose: NubePoseAtlas.naranjitoHoldingUmbrella, height: 80),
+          (pose: NubePoseAtlas.pablitoCarryingCushionHappy, height: 94),
+        ],
+      _ => const [
+          (pose: CrayonPoseAtlas.maestraProudCongratulating, height: 98),
+          (pose: CrayonPoseAtlas.florecitaHappyGrateful, height: 90),
+          (pose: CrayonPoseAtlas.naranjitoThumbsUp, height: 74),
+          (pose: CrayonPoseAtlas.pablitoWavingHappy, height: 90),
+        ],
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final chars = _charactersForStory(widget.storyIndex);
+
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+      child: ScaleTransition(
+        scale: _entryScale,
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 500),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFFFDF7),
+            borderRadius: BorderRadius.circular(40),
+            border: Border.all(color: const Color(0xFFFF9800), width: 6),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black26,
+                blurRadius: 24,
+                offset: Offset(0, 10),
+              ),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(34),
+            child: Stack(
+              children: [
+                // Continuous celebratory confetti & sparkles overlay
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: AnimatedBuilder(
+                      animation: _celebrateController,
+                      builder: (context, _) {
+                        return CustomPaint(
+                          painter: _CelebrationConfettiPainter(
+                            progress: _celebrateController.value,
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 20,
+                  ),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Animated "¡Felicidades!" celebration banner
+                        AnimatedBuilder(
+                          animation: _celebrateController,
+                          builder: (context, _) {
+                            final t = _celebrateController.value;
+                            final pulse =
+                                1.0 + math.sin(t * math.pi * 4) * 0.045;
+                            final tilt = math.sin(t * math.pi * 4) * 0.16;
+                            return Transform.scale(
+                              scale: pulse,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 24,
+                                  vertical: 10,
+                                ),
+                                decoration: BoxDecoration(
+                                  gradient: const LinearGradient(
+                                    colors: [
+                                      Color(0xFFFFB300),
+                                      Color(0xFFFF6D00),
+                                    ],
+                                  ),
+                                  borderRadius: BorderRadius.circular(32),
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 3.5,
+                                  ),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: const Color(0xFFFF8F00)
+                                          .withValues(alpha: 0.42),
+                                      blurRadius: 16,
+                                      offset: const Offset(0, 5),
+                                    ),
+                                  ],
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Transform.rotate(
+                                      angle: tilt,
+                                      child: const Icon(
+                                        Icons.celebration_rounded,
+                                        color: Colors.white,
+                                        size: 32,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    const Text(
+                                      '¡Felicidades!',
+                                      style: TextStyle(
+                                        fontSize: 30,
+                                        fontWeight: FontWeight.w900,
+                                        color: Colors.white,
+                                        letterSpacing: 0.6,
+                                        shadows: [
+                                          Shadow(
+                                            color: Colors.black26,
+                                            blurRadius: 6,
+                                            offset: Offset(0, 2),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Transform.rotate(
+                                      angle: -tilt,
+                                      child: const Icon(
+                                        Icons.auto_awesome_rounded,
+                                        color: Color(0xFFFFF59D),
+                                        size: 30,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+
+                        const SizedBox(height: 16),
+
+                        // Characters celebrating with joyful bounce animation
+                        AnimatedBuilder(
+                          animation: _celebrateController,
+                          builder: (context, _) {
+                            final t = _celebrateController.value;
+                            return Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: List.generate(chars.length, (idx) {
+                                final item = chars[idx];
+                                final dy =
+                                    math.sin(t * math.pi * 4 + idx * 1.15) *
+                                        5.5;
+                                return Padding(
+                                  padding: EdgeInsets.only(
+                                    left: idx == 0 ? 0 : 10,
+                                  ),
+                                  child: Transform.translate(
+                                    offset: Offset(0, dy),
+                                    child: CharacterPoseWidget(
+                                      pose: item.pose,
+                                      height: item.height,
+                                    ),
+                                  ),
+                                );
+                              }),
+                            );
+                          },
+                        ),
+
+                        const SizedBox(height: 20),
+
+                        // Giant icon-only buttons (Replay or Go Home)
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            _RoundKidsButton(
+                              icon: Icons.replay_rounded,
+                              color: const Color(0xFFFF9800),
+                              size: 76,
+                              onTap: widget.onReplay,
+                            ),
+                            _RoundKidsButton(
+                              icon: Icons.home_rounded,
+                              color: const Color(0xFF43A047),
+                              size: 76,
+                              onTap: widget.onHome,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CelebrationConfettiPainter extends CustomPainter {
+  final double progress;
+
+  _CelebrationConfettiPainter({required this.progress});
+
+  static const _palette = [
+    Color(0xFFFF8F00),
+    Color(0xFFFFD54F),
+    Color(0xFFFF5252),
+    Color(0xFF66BB6A),
+    Color(0xFF29B6F6),
+    Color(0xFFAB47BC),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..style = PaintingStyle.fill;
+    const count = 28;
+    for (var i = 0; i < count; i++) {
+      final seed = i * 1.6180339;
+      final baseX = ((seed * 137.5) % 100) / 100.0 * size.width;
+      final speed = 1 + (i % 3);
+      final fallT = (progress * speed + (seed % 1.0)) % 1.0;
+      final x = baseX + math.sin(fallT * math.pi * 4 + seed) * 14;
+      final y = fallT * (size.height + 24) - 12;
+
+      paint.color = _palette[i % _palette.length].withValues(alpha: 0.72);
+      canvas.save();
+      canvas.translate(x, y);
+      canvas.rotate(fallT * math.pi * 4 + seed);
+      if (i.isEven) {
+        canvas.drawRRect(
+          RRect.fromRectAndRadius(
+            const Rect.fromLTWH(-5, -3, 10, 6),
+            const Radius.circular(2),
+          ),
+          paint,
+        );
+      } else {
+        canvas.drawCircle(Offset.zero, 4.2, paint);
+      }
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CelebrationConfettiPainter oldDelegate) {
+    return oldDelegate.progress != progress;
   }
 }

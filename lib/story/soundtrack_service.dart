@@ -11,6 +11,7 @@ class SoundtrackService extends ChangeNotifier with WidgetsBindingObserver {
   final AudioPlayer _bgmPlayer = AudioPlayer();
   bool _initialized = false;
   bool _isAppInForeground = true;
+  bool _isManuallyPaused = false;
   String? _currentAssetPath;
 
   double _musicVolume = 0.35;
@@ -89,7 +90,23 @@ class SoundtrackService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _resumeIfActive() async {
-    if (_currentAssetPath == null) return;
+    if (_currentAssetPath == null || _isManuallyPaused) return;
+    try {
+      await _bgmPlayer.setVolume(_musicVolume);
+      await _bgmPlayer.resume();
+    } catch (_) {}
+  }
+
+  Future<void> pauseMusic() async {
+    _isManuallyPaused = true;
+    try {
+      await _bgmPlayer.pause();
+    } catch (_) {}
+  }
+
+  Future<void> resumeMusic() async {
+    _isManuallyPaused = false;
+    if (!_isAppInForeground || _currentAssetPath == null) return;
     try {
       await _bgmPlayer.setVolume(_musicVolume);
       await _bgmPlayer.resume();
@@ -107,6 +124,7 @@ class SoundtrackService extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _playTrack(String assetPath) async {
     await init();
+    _isManuallyPaused = false;
     try {
       if (_currentAssetPath == assetPath &&
           _bgmPlayer.state == PlayerState.playing) {

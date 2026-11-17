@@ -144,8 +144,9 @@ class _HomeScreenState extends State<HomeScreen>
       duration: const Duration(milliseconds: 1200),
     )..repeat(reverse: true);
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      SoundtrackService.instance.playHomeMusic();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await SoundtrackService.instance.playHomeMusic();
+      if (!mounted) return;
       VoiceNarratorService.instance.speak(
         '¡Hola amiguito! Toca un cuadrito con tus amigos para escuchar un cuento.',
         pitch: 1.2,
